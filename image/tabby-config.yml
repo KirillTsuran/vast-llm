@@ -35,7 +35,8 @@
     "reasoning_end_token": "</think>",
     "start_in_reasoning": "auto",
     "template_vars_default": {
-      "enable_thinking": true
+      "enable_thinking": true,
+      "reasoning_effort": "medium"
     }
   },
   "draft_model": {

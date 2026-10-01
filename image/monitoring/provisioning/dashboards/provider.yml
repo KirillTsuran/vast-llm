@@ -1,0 +1,5 @@
+apiVersion: 1
+providers:
+  - name: llm
+    type: file
+    options: {path: /opt/monitoring/dashboards}

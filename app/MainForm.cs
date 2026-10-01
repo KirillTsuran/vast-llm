@@ -74,25 +74,29 @@ public class MainForm : Form
         msg.Text = core.Message;
         url.Text = $"http://127.0.0.1:{core.Cfg.LocalPort}/v1   модель: {core.Cfg.Model}";
         var s = core.St; var r = core.Cfg.UsdRub;
-        if (s.Id != 0)
+        var all = core.AllRented();
+        if (all.Count > 0)
         {
-            var h = (DateTime.UtcNow - s.Created).TotalHours;
-            info.Text = $"Машина #{s.Id} · {s.Gpu} · {s.Geo}\n" +
-                        $"Цена {s.Dph * r:F1} ₽/ч · работает {(int)(h * 60)} мин · потрачено ≈ {h * s.Dph * r:F0} ₽\n" +
-                        (core.Phase == "ready" ? $"Туннель {(core.Tunnel ? "есть" : "нет")} · без запросов {core.IdleMin} мин · удаляется только кнопкой Down" : "");
+            var lines = all.Select(x =>
+            {
+                var h = (DateTime.UtcNow - x.Created).TotalHours;
+                return $"{(x.Main ? "●" : "○")} #{x.Id} · {x.Gpu} · {x.Geo} · {x.Dph * r:F1} ₽/ч · {(int)(h * 60)} мин · ≈ {h * x.Dph * r:F0} ₽{(x.Main ? "" : " (запуск)")}";
+            });
+            info.Text = $"Арендовано в Vast ({all.Count}), всего {all.Sum(x => x.Dph) * r:F1} ₽/ч:\n" + string.Join("\n", lines) +
+                        (core.Phase == "ready" ? $"\nТуннель {(core.Tunnel ? "есть" : "нет")} · без запросов {core.IdleMin} мин · удаляется только кнопкой Down" : "");
         }
-        else info.Text = $"GPU: {core.Cfg.Gpu} до {core.Cfg.MaxDph * r:F0} ₽/ч · курс {r:F2} ₽/$";
+        else info.Text = $"Ничего не арендовано · GPU: {core.Cfg.Gpu} до {core.Cfg.MaxDph * r:F0} ₽/ч · курс {r:F2} ₽/$";
         bool busy = core.Phase is "renting" or "booting" or "downloading" or "loading" or "stopping";
         up.Enabled = !busy && core.Phase != "ready";
-        down.Enabled = s.Id != 0 && core.Phase != "stopping";
+        down.Enabled = all.Count > 0 && core.Phase != "stopping";
         tray.Text = "VastLLM: " + phase.Text;
     }
 
     async void OnClosing(object sender, FormClosingEventArgs e)
     {
-        if (exiting || core.St.Id == 0) { tray.Visible = false; return; }
+        if (exiting || core.AllRented().Count == 0) { tray.Visible = false; return; }
         e.Cancel = true;
-        var r = MessageBox.Show($"Машина работает (≈{core.St.Dph * core.Cfg.UsdRub:F0} ₽/ч).\n\nДа — удалить машину и выйти\nНет — выйти, машина продолжит работать и оплачиваться до кнопки Down\nОтмена — не выходить",
+        var r = MessageBox.Show($"Арендовано машин: {core.AllRented().Count} (≈{core.AllRented().Sum(x => x.Dph) * core.Cfg.UsdRub:F0} ₽/ч).\n\nДа — удалить машины и выйти\nНет — выйти, машины останутся и будут оплачиваться; при следующем запуске программа их подхватит\nОтмена — не выходить",
             "VastLLM", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
         if (r == DialogResult.Cancel) return;
         if (r == DialogResult.Yes) { Show(); await core.Down("выход из программы"); }

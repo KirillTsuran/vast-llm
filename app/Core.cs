@@ -33,6 +33,19 @@ public class State
     [JsonPropertyName("created")] public DateTime Created { get; set; }
     [JsonPropertyName("host_key")] public string HostKey { get; set; } = "";
     [JsonPropertyName("bad_machines")] public List<long> BadMachines { get; set; } = new();
+    // machines rented by an Up that has not picked its winner yet (persisted right after renting)
+    [JsonPropertyName("pending")] public List<Rented> Pending { get; set; } = new();
+}
+
+public class Rented
+{
+    [JsonPropertyName("id")] public long Id { get; set; }
+    [JsonPropertyName("machine")] public long Machine { get; set; }
+    [JsonPropertyName("gpu")] public string Gpu { get; set; } = "";
+    [JsonPropertyName("geo")] public string Geo { get; set; } = "";
+    [JsonPropertyName("usd_per_hour")] public double Dph { get; set; }
+    [JsonPropertyName("created")] public DateTime Created { get; set; }
+    [JsonIgnore] public bool Main { get; set; }
 }
 
 public record Offer(long Id, long Machine, double Dph, double InetCost, double Inet, string Geo, string Gpu);
@@ -73,7 +86,15 @@ public class Core
         return Cfg.VastKey.Trim() == "" ? "впишите vast_api_key в config.json и нажмите Up" : null;
     }
     public void SaveConfig() => File.WriteAllText(P("config.json"), JsonSerializer.Serialize(Cfg, JsonOpt));
-    void SaveState() { lock (stateLock) File.WriteAllText(P("state.json"), JsonSerializer.Serialize(St, JsonOpt)); }
+    void SaveState() // atomic: a crash or power loss never leaves a half-written state.json
+    {
+        lock (stateLock)
+        {
+            var tmp = P("state.json.tmp");
+            File.WriteAllText(tmp, JsonSerializer.Serialize(St, JsonOpt));
+            File.Move(tmp, P("state.json"), true);
+        }
+    }
     public void LoadState()
     {
         try { if (File.Exists(P("state.json"))) St = JsonSerializer.Deserialize<State>(File.ReadAllText(P("state.json"))) ?? new State(); } catch { St = new State(); }
@@ -92,20 +113,20 @@ public class Core
         if (ch) { Log($"[{phase}] {msg}"); Changed?.Invoke(); }
     }
 
-    // RSA key for SSH (kept next to the exe); public key goes to the container via env
+    // ECDSA P-256 key for SSH (kept next to the exe). Short public key: it travels to the container in an env variable.
     public void LoadKey()
     {
         var kp = P("ssh_key.pem");
-        if (!File.Exists(kp)) { using var rsa = RSA.Create(3072); File.WriteAllText(kp, rsa.ExportRSAPrivateKeyPem()); }
-        using (var rsa = RSA.Create())
+        if (!File.Exists(kp)) { using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256); File.WriteAllText(kp, ec.ExportECPrivateKeyPem()); }
+        using (var ec = ECDsa.Create())
         {
-            rsa.ImportFromPem(File.ReadAllText(kp));
-            var p = rsa.ExportParameters(false);
+            ec.ImportFromPem(File.ReadAllText(kp));
+            var q = ec.ExportParameters(false).Q;
             var ms = new MemoryStream();
             void Str(byte[] b) { var l = BitConverter.GetBytes(b.Length); Array.Reverse(l); ms.Write(l); ms.Write(b); }
-            byte[] Mp(byte[] b) => (b[0] & 0x80) != 0 ? new byte[] { 0 }.Concat(b).ToArray() : b;
-            Str(Encoding.ASCII.GetBytes("ssh-rsa")); Str(Mp(p.Exponent)); Str(Mp(p.Modulus));
-            pub = "ssh-rsa " + Convert.ToBase64String(ms.ToArray()) + " " + Label;
+            Str(Encoding.ASCII.GetBytes("ecdsa-sha2-nistp256")); Str(Encoding.ASCII.GetBytes("nistp256"));
+            Str(new byte[] { 4 }.Concat(q.X).Concat(q.Y).ToArray());
+            pub = "ecdsa-sha2-nistp256 " + Convert.ToBase64String(ms.ToArray()) + " " + Label;
         }
         key = new PrivateKeyFile(kp);
     }
@@ -147,7 +168,8 @@ public class Core
         throw last;
     }
 
-    async Task<List<JsonNode>> Instances() => (await Api(HttpMethod.Get, "/v1/instances"))?["instances"]?.AsArray().ToList() ?? new();
+    // "/v1/instances/" with the trailing slash: Vast answers 301 without it and .NET drops the auth header on redirect
+    async Task<List<JsonNode>> Instances() => (await Api(HttpMethod.Get, "/v1/instances/"))?["instances"]?.AsArray().ToList() ?? new();
     async Task<JsonNode> Instance(long id) => (await Instances()).FirstOrDefault(i => (long)i["id"] == id);
 
     async Task<List<Offer>> Offers()
@@ -208,13 +230,14 @@ public class Core
     async Task<(SshClient, string)> Dial(long id, string pinned, TimeSpan boot, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + boot; DateTime? running = null; Exception last = new("машина не запустилась вовремя");
+        string lastApiErr = null;
         while (DateTime.UtcNow < deadline)
         {
             ct.ThrowIfCancellationRequested();
             JsonNode inst = null;
             try { inst = await Instance(id); if (inst == null) throw new Exception("машина исчезла"); }
             catch (Exception e) when (e.Message == "машина исчезла") { throw; }
-            catch { }
+            catch (Exception e) { if (e.Message != lastApiErr) { lastApiErr = e.Message; Log("Vast API: " + e.Message); } }
             if (inst != null && (string)inst["actual_status"] == "running" && !string.IsNullOrEmpty((string)inst["public_ipaddr"]))
             {
                 running ??= DateTime.UtcNow;
@@ -274,47 +297,59 @@ public class Core
         {
             if (St.Id != 0 && !Tunnel)
             {
-                Set("booting", $"переподключаюсь к машине {St.Id}");
-                try { var (c, hk) = await Dial(St.Id, St.HostKey, TimeSpan.FromMinutes(3), ct); St.HostKey = hk; SaveState(); Attach(c); }
+                Set("booting", $"подключаюсь к машине {St.Id}");
+                try { var (c, hk) = await Dial(St.Id, St.HostKey, TimeSpan.FromMinutes(5), ct); St.HostKey = hk; SaveState(); Attach(c); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception e) { Set("error", $"машина {St.Id} не отвечает по SSH ({e.Message}). Она не удалена: Up — повторить, Down — удалить"); return; }
             }
             for (int round = 1; St.Id == 0 && round <= 3; round++)
             {
-                var offs = await Offers();
-                if (offs.Count == 0) { Set("error", $"нет {Cfg.Gpu} дешевле ${Cfg.MaxDph}/ч — поднимите max_price_usd_per_hour"); return; }
-                var picks = offs.Take(Cfg.Race ? 2 : 1).ToList();
-                Set("renting", picks.Count > 1 ? $"арендую 2 машины {Cfg.Gpu}, оставлю первую поднявшуюся" : $"арендую {Cfg.Gpu}");
-                using var race = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var tasks = picks.Select(o => Task.Run(async () =>
+                // candidates: machines already rented by an interrupted Up (state.json), otherwise new offers
+                var cands = St.Pending.ToList();
+                if (cands.Count == 0)
                 {
-                    long id = 0;
-                    try
+                    var offs = await Offers();
+                    if (offs.Count == 0) { Set("error", $"нет {Cfg.Gpu} дешевле ${Cfg.MaxDph}/ч — поднимите max_price_usd_per_hour"); return; }
+                    Set("renting", Cfg.Race ? $"арендую 2 машины {Cfg.Gpu}, оставлю первую поднявшуюся" : $"арендую {Cfg.Gpu}");
+                    foreach (var o in offs.Take(Cfg.Race ? 2 : 1))
                     {
-                        id = await Rent(o);
-                        Log($"арендована {id}: {o.Gpu} {o.Geo} {o.Dph * Cfg.UsdRub:F1} ₽/ч, сеть {(int)o.Inet} Мбит/с");
-                        var (c, hk) = await Dial(id, "", TimeSpan.FromMinutes(10), race.Token);
-                        return (o, id, c, hk, (Exception)null);
+                        try
+                        {
+                            var id = await Rent(o);
+                            var r = new Rented { Id = id, Machine = o.Machine, Gpu = o.Gpu, Geo = o.Geo, Dph = o.Dph, Created = DateTime.UtcNow };
+                            St.Pending.Add(r); SaveState(); cands.Add(r);
+                            Log($"арендована {id}: {o.Gpu} {o.Geo} {o.Dph * Cfg.UsdRub:F1} ₽/ч, сеть {(int)o.Inet} Мбит/с");
+                        }
+                        catch (Exception e) { Log($"аренда не удалась ({o.Geo}): {e.Message}"); St.BadMachines.Add(o.Machine); }
                     }
-                    catch (Exception e) { return (o, id, (SshClient)null, "", e); }
-                })).ToList();
+                    if (cands.Count == 0) continue;
+                }
+                else Log($"продолжаю прерванный запуск: машины {string.Join(", ", cands.Select(x => x.Id))}");
                 Set("booting", "машина качает образ и запускается (~5 мин)");
+                using var race = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var tasks = cands.Select(r => Task.Run(async () =>
+                {
+                    try { var (c, hk) = await Dial(r.Id, "", TimeSpan.FromMinutes(10), race.Token); return (r, c, hk, (Exception)null); }
+                    catch (Exception e) { return (r, (SshClient)null, "", e); }
+                })).ToList();
                 bool won = false;
                 while (tasks.Count > 0)
                 {
                     var t = await Task.WhenAny(tasks); tasks.Remove(t);
-                    var (o, id, c, hk, e) = t.Result;
+                    var (r, c, hk, e) = t.Result;
                     if (e != null || won)
                     {
-                        if (e != null && !won && e is not OperationCanceledException) { Log($"хост {o.Machine} не подошёл: {e.Message}"); St.BadMachines.Add(o.Machine); }
+                        if (e != null && !won && e is not OperationCanceledException) { Log($"машина {r.Id} не подошла: {e.Message}"); St.BadMachines.Add(r.Machine); }
                         c?.Dispose();
-                        if (id != 0) _ = Destroy(id);
+                        St.Pending.RemoveAll(x => x.Id == r.Id); SaveState();
+                        _ = DestroyPending(r.Id);
                         continue;
                     }
                     won = true; race.Cancel();
-                    St = new State { Id = id, Gpu = o.Gpu, Geo = o.Geo, Dph = o.Dph, Created = DateTime.UtcNow, HostKey = hk, BadMachines = St.BadMachines };
+                    St.Pending.RemoveAll(x => x.Id == r.Id);
+                    St.Id = r.Id; St.Gpu = r.Gpu; St.Geo = r.Geo; St.Dph = r.Dph; St.Created = r.Created; St.HostKey = hk;
                     SaveState(); Attach(c);
-                    Log($"выбрана машина {id} ({o.Geo}), SSH через {(DateTime.UtcNow - start):mm\\:ss}");
+                    Log($"выбрана машина {r.Id} ({r.Geo}), SSH через {(DateTime.UtcNow - start):mm\\:ss}");
                 }
                 ct.ThrowIfCancellationRequested();
             }
@@ -344,24 +379,33 @@ public class Core
         finally { busy.Release(); }
     }
 
+    // an extra machine of the same Up (race loser): delete it and drop it from state.json once Vast confirms
+    async Task DestroyPending(long id)
+    {
+        try { await Destroy(id); St.Pending.RemoveAll(x => x.Id == id); SaveState(); Changed?.Invoke(); }
+        catch (Exception e) { Log(e.Message); }
+    }
+
     public async Task Down(string reason)
     {
         upCts?.Cancel();
         await busy.WaitAsync();
         try
         {
-            if (St.Id == 0) { Set("off", "машин нет"); return; }
-            Set("stopping", $"удаляю машину ({reason})");
+            var ids = St.Pending.Select(x => x.Id).ToList();
+            if (St.Id != 0) ids.Insert(0, St.Id);
+            if (ids.Count == 0) { Set("off", "машин нет"); return; }
+            Set("stopping", $"удаляю {string.Join(", ", ids)} ({reason})");
             CloseClient();
-            await Destroy(St.Id);
+            foreach (var id in ids) await Destroy(id);
             St = new State { BadMachines = St.BadMachines }; SaveState();
-            Set("off", "машина удалена, оплата остановлена");
+            Set("off", "машины удалены, оплата остановлена");
         }
         catch (Exception e) { Set("error", e.Message); }
         finally { busy.Release(); }
     }
 
-    // ---------- every 30 s: keep the tunnel alive (machines are deleted only by the Down button) ----------
+    // ---------- every 30 s: keep the tunnel alive (machines are deleted only by Down / race) ----------
     public async Task Tick()
     {
         if (St.Id == 0 || busy.CurrentCount == 0) return;
@@ -370,7 +414,7 @@ public class Core
             Log("связь потеряна, переподключаюсь");
             try
             {
-                if (await Instance(St.Id) == null) { CloseClient(); St = new State { BadMachines = St.BadMachines }; SaveState(); Set("error", "машина пропала у Vast — нажмите Up"); return; }
+                if (await Instance(St.Id) == null) { CloseClient(); St.Id = 0; SaveState(); Set("error", "машина пропала у Vast — нажмите Up"); return; }
                 var (c, _) = await Dial(St.Id, St.HostKey, TimeSpan.FromMinutes(3), CancellationToken.None);
                 Attach(c); Log("связь восстановлена");
             }
@@ -379,6 +423,7 @@ public class Core
         Exec("touch /opt/llm/heartbeat");
     }
 
+    // after a restart / PC reboot: reconcile state.json with what is really rented at Vast, then reconnect
     public async Task Startup()
     {
         LoadKey(); LoadState();
@@ -386,15 +431,35 @@ public class Core
         if (err != null) Set("error", err);
         _ = RateAsync();
         if (Cfg.VastKey.Trim() == "") return;
-        if (St.Id == 0)
+        try
         {
-            try
+            var live = (await Instances()).Where(i => (string)i["label"] == Label).ToList();
+            var ids = live.Select(i => (long)i["id"]).ToHashSet();
+            if (St.Id != 0 && !ids.Contains(St.Id)) { Log($"машины {St.Id} у Vast больше нет"); St.Id = 0; }
+            St.Pending.RemoveAll(x => !ids.Contains(x.Id));
+            foreach (var i in live) // rented by this program but missing from state.json (e.g. state lost): adopt, never lose track
             {
-                var mine = (await Instances()).FirstOrDefault(i => (string)i["label"] == Label);
-                if (mine != null) { St = new State { Id = (long)mine["id"], Gpu = (string)mine["gpu_name"] ?? "", Geo = (string)mine["geolocation"] ?? "", Dph = (double?)mine["dph_total"] ?? 0, Created = DateTime.UtcNow, BadMachines = St.BadMachines }; SaveState(); }
+                var id = (long)i["id"];
+                if (id != St.Id && !St.Pending.Any(x => x.Id == id))
+                    St.Pending.Add(new Rented { Id = id, Machine = (long?)i["machine_id"] ?? 0, Gpu = (string)i["gpu_name"] ?? "", Geo = (string)i["geolocation"] ?? "", Dph = (double?)i["dph_total"] ?? 0, Created = DateTime.UtcNow });
             }
-            catch { }
+            SaveState();
+            Log($"в Vast машин этой программы: {ids.Count} ({string.Join(", ", ids)})");
+            if (St.Id != 0 && St.Pending.Count > 0)
+            {
+                Log($"лишние машины прерванного запуска {string.Join(", ", St.Pending.Select(x => x.Id))} — удаляю, основная {St.Id}");
+                foreach (var x in St.Pending.ToList()) _ = DestroyPending(x.Id);
+            }
+            if (St.Id != 0 || St.Pending.Count > 0) await Up();
+            else Set("off", "машин нет");
         }
-        if (St.Id != 0) { Log($"найдена работающая машина {St.Id} — подключаюсь"); await Up(); }
+        catch (Exception e) { Set("error", "не удалось проверить Vast: " + e.Message); }
+    }
+
+    public List<Rented> AllRented()
+    {
+        var l = St.Pending.ToList();
+        if (St.Id != 0) l.Insert(0, new Rented { Id = St.Id, Gpu = St.Gpu, Geo = St.Geo, Dph = St.Dph, Created = St.Created, Main = true });
+        return l;
     }
 }

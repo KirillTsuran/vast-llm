@@ -20,6 +20,11 @@ RUN SP=$(python -c 'import exllamav3,os;print(os.path.dirname(exllamav3.__file__
     && cp /tmp/overlay/errors.py common/errors.py && cp /tmp/overlay/auth.py common/auth.py \
     && cp /tmp/overlay/observability.py /tmp/overlay/serve.py /app/ \
     && python /tmp/lb/patch_tabby.py /app && rm -rf /tmp/overlay /tmp/lb
+# Monitoring: Prometheus + Grafana (127.0.0.1 only, reached through the app's SSH tunnel) and a tiny nvidia-smi exporter
+ARG PROM=3.15.0
+ARG GRAF=13.2.3
+RUN curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM}/prometheus-${PROM}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/prometheus-${PROM}.linux-amd64 /opt/prometheus     && curl -fsSL "https://dl.grafana.com/oss/release/grafana-${GRAF}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/grafana-* /opt/grafana
+COPY monitoring/ /opt/monitoring/
 COPY tabby-config.yml /app/config.yml
 COPY start.sh entry.sh download.py /opt/llm/
 COPY manifests/ /opt/llm/manifests/

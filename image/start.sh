@@ -1,8 +1,12 @@
 #!/bin/bash
 # Vast onstart: download pinned weights, start TabbyAPI on 127.0.0.1:8080 (reachable only via the SSH tunnel),
-# and a watchdog that stops paying if the Windows app disappears (no heartbeat).
+# and the heartbeat watchdog (the app passes WATCHDOG_MIN=1 year: machines are removed only by the Down button).
 L=/var/log/llm; S=/opt/llm/state; mkdir -p $L; set -a; . /opt/llm/vast.env 2>/dev/null; set +a
 pgrep -f "python serve.py" >/dev/null && exit 0
+# monitoring first, so GPU panels work during the model download
+python3 /opt/monitoring/gpu_exporter.py > $L/gpu_exporter.log 2>&1 &
+/opt/prometheus/prometheus --config.file=/opt/monitoring/prometheus.yml --storage.tsdb.path=/var/lib/prometheus   --storage.tsdb.retention.time=2d --web.listen-address=127.0.0.1:9090 > $L/prometheus.log 2>&1 &
+GF_SERVER_HTTP_ADDR=127.0.0.1 GF_SERVER_HTTP_PORT=3000 GF_PATHS_PROVISIONING=/opt/monitoring/provisioning GF_PATHS_DATA=/var/lib/grafana GF_AUTH_ANONYMOUS_ENABLED=true GF_AUTH_ANONYMOUS_ORG_ROLE=Admin GF_AUTH_DISABLE_LOGIN_FORM=true GF_ANALYTICS_REPORTING_ENABLED=false GF_ANALYTICS_CHECK_FOR_UPDATES=false GF_NEWS_NEWS_FEED_ENABLED=false GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/opt/monitoring/dashboards/llm.json   /opt/grafana/bin/grafana server --homepath /opt/grafana > $L/grafana.log 2>&1 &
 echo downloading > $S
 if ! python3 /opt/llm/download.py qwen3.8-27b-uncensored dflash > $L/download.log 2>&1; then echo download-failed > $S; exit 1; fi
 python3 - <<'PY'
