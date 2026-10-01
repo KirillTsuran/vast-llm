@@ -36,3 +36,5 @@ compactor:
   compaction_interval: 10m
 analytics:
   reporting_enabled: false
+frontend:
+  address: 127.0.0.1   # single binary: the querier must reach the frontend on loopback

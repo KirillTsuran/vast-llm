@@ -4,7 +4,7 @@
 L=/var/log/llm; mkdir -p $L/dialogs /var/lib/prometheus /var/lib/loki /var/lib/alloy /var/lib/grafana
 forever() { local name=$1; shift; ( while true; do "$@" >> $L/$name.log 2>&1; echo "$(date) $name exited, restart in 5s" >> $L/$name.log; sleep 5; done ) & }
 forever gpu_exporter python3 /opt/monitoring/gpu_exporter.py
-forever node_exporter /opt/node_exporter/node_exporter --web.listen-address=127.0.0.1:9100
+forever node_exporter /opt/node_exporter/node_exporter --web.listen-address=127.0.0.1:9100 \n  --collector.filesystem.fs-types-exclude="^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$"
 forever prometheus /opt/prometheus/prometheus --config.file=/opt/monitoring/prometheus.yml --storage.tsdb.path=/var/lib/prometheus \
   --storage.tsdb.retention.time=3d --web.listen-address=127.0.0.1:9090
 forever loki /opt/loki/loki --config.file=/opt/monitoring/loki.yml

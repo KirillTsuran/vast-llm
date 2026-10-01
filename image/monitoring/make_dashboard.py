@@ -82,9 +82,10 @@ m.ts('Сеть', [('sum(rate(node_network_receive_bytes_total{device!="lo"}[1m])
      18, 6, unit='Bps')
 m.y += 8
 m.row('Сервисы')
-for i, (job, title) in enumerate([('tabby', 'TabbyAPI'), ('gpu', 'Экспортёр GPU'), ('node', 'node_exporter'), ('loki', 'Loki'), ('alloy', 'Alloy')]):
-    m.stat(title, f'max(up{{job="{job}"}}) or vector(0)', i * 4 + (i > 0) * 0, 4, mappings=UPDOWN)
-m.stat('Prometheus', 'max(up{job="tabby"}) * 0 + 1', 20, 4, mappings=UPDOWN, desc='Если панели показывают данные — Prometheus работает')
+SERVICES = [('tabby', 'TabbyAPI (модель)'), ('gpu', 'Экспортёр GPU'), ('node', 'node_exporter'), ('prometheus', 'Prometheus'),
+            ('loki', 'Loki'), ('alloy', 'Alloy'), ('grafana', 'Grafana')]
+for i, (job, title) in enumerate(SERVICES):
+    m.stat(title, f'max(up{{job="{job}"}}) or vector(0)', i * 3 + (i >= 4) * 1, 3 + (i == 3), mappings=UPDOWN)
 m.y += 4
 m.save('llm-metrics', 'LLM — метрики', 'llm-metrics.json', links=link('llm-logs', 'LLM — логи'))
 

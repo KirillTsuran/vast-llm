@@ -963,7 +963,7 @@
   },
   {
    "type": "stat",
-   "title": "TabbyAPI",
+   "title": "TabbyAPI (модель)",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -972,7 +972,7 @@
    "gridPos": {
     "x": 0,
     "y": 41,
-    "w": 4,
+    "w": 3,
     "h": 4
    },
    "targets": [
@@ -1032,9 +1032,9 @@
     "uid": "prom"
    },
    "gridPos": {
-    "x": 4,
+    "x": 3,
     "y": 41,
-    "w": 4,
+    "w": 3,
     "h": 4
    },
    "targets": [
@@ -1094,14 +1094,76 @@
     "uid": "prom"
    },
    "gridPos": {
-    "x": 8,
+    "x": 6,
+    "y": 41,
+    "w": 3,
+    "h": 4
+   },
+   "targets": [
+    {
+     "expr": "max(up{job=\"node\"}) or vector(0)",
+     "refId": "A",
+     "instant": true,
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "не работает",
+         "color": "red"
+        },
+        "1": {
+         "text": "работает",
+         "color": "green"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value"
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Prometheus",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 9,
     "y": 41,
     "w": 4,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"node\"}) or vector(0)",
+     "expr": "max(up{job=\"prometheus\"}) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1156,9 +1218,9 @@
     "uid": "prom"
    },
    "gridPos": {
-    "x": 12,
+    "x": 13,
     "y": 41,
-    "w": 4,
+    "w": 3,
     "h": 4
    },
    "targets": [
@@ -1220,7 +1282,7 @@
    "gridPos": {
     "x": 16,
     "y": 41,
-    "w": 4,
+    "w": 3,
     "h": 4
    },
    "targets": [
@@ -1273,21 +1335,21 @@
   },
   {
    "type": "stat",
-   "title": "Prometheus",
-   "description": "Если панели показывают данные — Prometheus работает",
+   "title": "Grafana",
+   "description": "",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
    },
    "gridPos": {
-    "x": 20,
+    "x": 19,
     "y": 41,
-    "w": 4,
+    "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"tabby\"}) * 0 + 1",
+     "expr": "max(up{job=\"grafana\"}) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {
