@@ -271,7 +271,7 @@ func (a *App) up() {
 		a.st = State{ID: r.ID, GPU: o.GPU, Geo: o.Geo, DPH: o.DPH, Created: time.Now(), BadMachines: a.st.BadMachines, KeyAdded: true}
 		a.saveState()
 		a.logf("rented instance %d: %s %s $%.3f/h", r.ID, o.GPU, o.Geo, o.DPH)
-		a.api("POST", fmt.Sprintf("/instances/%d/ssh/", r.ID), map[string]string{"ssh_key": a.pub}, nil)
+		a.api("POST", fmt.Sprintf("/instances/%d/ssh", r.ID), map[string]string{"ssh_key": a.pub}, nil)
 		if err := a.connect(12 * time.Minute); err != nil {
 			a.logf("host %d not usable (%v), replacing", o.Machine, err)
 			a.st.BadMachines = append(a.st.BadMachines, o.Machine)
