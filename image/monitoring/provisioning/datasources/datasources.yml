@@ -5,7 +5,7 @@ datasources:
     type: prometheus
     url: http://127.0.0.1:9090
     isDefault: true
-    jsonData: {timeInterval: 5s}
+    jsonData: {timeInterval: 10s}   # slowest scrape (tabby); sets the minimum $__rate_interval
   - name: Loki
     uid: loki
     type: loki

@@ -17,6 +17,12 @@ loki.process "llm" {
     expression          = "context canceled|error notifying scheduler about finished query|Partial data response error|Plugin Request Completed"
     drop_counter_reason = "query_cancel_noise"
   }
+  // benign one-time startup messages (udev is absent in containers; Loki logs these until its ring is ready,
+  // and Grafana's first label lookup fails while Loki is still starting)
+  stage.drop {
+    expression          = "disabling udev device properties|empty ring|error health checking|resources/label/service/values status=500"
+    drop_counter_reason = "startup_noise"
+  }
   // service name from the file name: /var/log/llm/tabby.log -> tabby
   stage.regex {
     expression = "/var/log/llm/(?:dialogs/)?(?P<service>[a-z_]+)"

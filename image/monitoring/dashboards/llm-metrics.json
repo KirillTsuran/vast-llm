@@ -26,7 +26,7 @@
   {
    "type": "stat",
    "title": "Скорость, ток/с",
-   "description": "Средняя скорость написания ответов за последний час: все токены ответов / всё время их написания. Простой не учитывается",
+   "description": "Средняя скорость написания ответов за последний час, по всем токенам: токены ответов / время их написания. Простой не учитывается",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -40,6 +40,7 @@
    "targets": [
     {
      "expr": "sum(increase(llm_generated_tokens_total[1h])) / (sum(increase(llm_decode_seconds_total[1h])) > 0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -69,13 +70,14 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
    "type": "stat",
    "title": "Ответов за час",
-   "description": "",
+   "description": "Сколько запросов модель довела до ответа за последний час (отменённые клиентом не считаются)",
    "datasource": {
     "type": "loki",
     "uid": "loki"
@@ -89,6 +91,7 @@
    "targets": [
     {
      "expr": "sum(count_over_time({event=\"generation_end\"} !~ `\"partial\": true` [1h])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -117,13 +120,14 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
    "type": "stat",
-   "title": "Пишет сейчас",
-   "description": "Сколько запросов модель обрабатывает прямо сейчас (0 или 1)",
+   "title": "Запросы сейчас",
+   "description": "«В работе» — модель читает или пишет (одновременно только один запрос). «Ждут» — запросы в очереди: им ответ начнётся позже",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -137,7 +141,18 @@
    "targets": [
     {
      "expr": "sum(llm_requests_processing) or vector(0)",
+     "legendFormat": "в работе",
      "refId": "A",
+     "instant": true,
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "sum(llm_requests_deferred) or vector(0)",
+     "legendFormat": "ждут",
+     "refId": "B",
      "instant": true,
      "datasource": {
       "type": "prometheus",
@@ -165,13 +180,14 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value_and_name",
+    "orientation": "vertical"
    }
   },
   {
    "type": "stat",
-   "title": "Зацикливаний за сутки",
-   "description": "Ответы, оборванные с ошибкой generation_loop_detected. Норма — 0",
+   "title": "Зацикливаний, сутки",
+   "description": "Ответы за сутки, оборванные с ошибкой generation_loop_detected. Норма — 0",
    "datasource": {
     "type": "loki",
     "uid": "loki"
@@ -185,6 +201,7 @@
    "targets": [
     {
      "expr": "sum(count_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json reason=\"metrics.eos_reason\" | reason=\"loop_detected\" [24h])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -213,13 +230,14 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
    "type": "stat",
-   "title": "LoopBreak спас, раз",
-   "description": "За сутки: сколько раз защита прервала повтор в рассуждении, и ответ продолжился нормально",
+   "title": "LoopBreak спас, сутки",
+   "description": "Сколько раз за сутки защита прервала повтор в рассуждении, и ответ продолжился нормально",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -233,6 +251,7 @@
    "targets": [
     {
      "expr": "sum(increase(llm_loopbreak_events_total[24h])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -261,7 +280,8 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
@@ -281,6 +301,7 @@
    "targets": [
     {
      "expr": "llm_gpu_util_percent",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -309,12 +330,13 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
    "type": "row",
-   "title": "Модель: скорость (каждая точка — один ответ, в момент его окончания)",
+   "title": "Модель: скорость прямо сейчас",
    "collapsed": false,
    "gridPos": {
     "x": 0,
@@ -326,141 +348,288 @@
   },
   {
    "type": "timeseries",
-   "title": "Скорость ответа, ток/с",
-   "description": "Токенов в секунду, пока модель писала этот ответ (считает сам движок). Обычно 40–110: чем лучше DFlash2 угадывает, тем быстрее",
+   "title": "Пишет ответ, ток/с",
+   "description": "С какой скоростью модель пишет ответ в этот момент. Пусто — модель ничего не пишет. Обычно 40–140: быстрее на коротком контексте и коде, медленнее на длинном контексте",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(llm_live_generated_tokens_total[$__rate_interval])) / (sum(rate(llm_live_generate_seconds_total[$__rate_interval])) > 0)",
+     "legendFormat": "скорость",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "скорость"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Читает запрос, ток/с",
+   "description": "С какой скоростью модель читает новую часть запроса (то, чего нет в кэше). Пусто — модель ничего не читает. Обычно 400–1000",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 6,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(llm_live_prompt_tokens_total[$__rate_interval])) / (sum(rate(llm_live_prefill_seconds_total[$__rate_interval])) > 0)",
+     "legendFormat": "скорость",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "скорость"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Запросы: в работе и в очереди",
+   "description": "Модель отвечает строго по одному запросу (max_batch_size 1). Если клиент шлёт несколько запросов сразу, остальные ждут в очереди",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 6,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "max(max_over_time(llm_requests_processing[$__rate_interval]))",
+     "legendFormat": "в работе",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "max(max_over_time(llm_requests_deferred[$__rate_interval]))",
+     "legendFormat": "ждут в очереди",
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "stepAfter",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "в работе"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "ждут в очереди"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "row",
+   "title": "Модель: ответы",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 15,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Ожидание до первого токена, с",
+   "description": "Среднее по ответам за последние 5 минут: сколько секунд прошло от запроса до начала ответа. Складывается из ожидания в очереди и чтения запроса",
    "datasource": {
     "type": "loki",
     "uid": "loki"
    },
    "gridPos": {
     "x": 0,
-    "y": 6,
+    "y": 16,
     "w": 8,
-    "h": 10
+    "h": 9
    },
    "targets": [
     {
-     "expr": "max by () (max_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json v=\"metrics.gen_tokens_per_sec\" | unwrap v | __error__=\"\" [$__interval]))",
-     "legendFormat": "пишет ответ",
-     "refId": "A",
-     "datasource": {
-      "type": "loki",
-      "uid": "loki"
-     }
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "decimals": 0,
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 10,
-      "drawStyle": "points",
-      "pointSize": 9,
-      "showPoints": "always",
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "table",
-     "placement": "bottom",
-     "calcs": [
-      "lastNotNull",
-      "max"
-     ],
-     "sortBy": "Last *",
-     "sortDesc": true
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "interval": "15s"
-  },
-  {
-   "type": "timeseries",
-   "title": "Скорость чтения запроса, ток/с",
-   "description": "Как быстро модель прочитала новую часть запроса (то, чего не было в кэше). Только запросы с новой частью от 1000 токенов: на коротких скорость не показательна",
-   "datasource": {
-    "type": "loki",
-    "uid": "loki"
-   },
-   "gridPos": {
-    "x": 8,
-    "y": 6,
-    "w": 8,
-    "h": 10
-   },
-   "targets": [
-    {
-     "expr": "max by () (max_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json v=\"metrics.prompt_tokens_per_sec\", p=\"metrics.prompt_tokens\", c=\"metrics.cached_tokens\" | label_format n=`{{ subf .p .c }}` | n >= 1000 | unwrap v | __error__=\"\" [$__interval]))",
-     "legendFormat": "читает запрос",
-     "refId": "A",
-     "datasource": {
-      "type": "loki",
-      "uid": "loki"
-     }
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "decimals": 0,
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 10,
-      "drawStyle": "points",
-      "pointSize": 9,
-      "showPoints": "always",
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "table",
-     "placement": "bottom",
-     "calcs": [
-      "lastNotNull",
-      "max"
-     ],
-     "sortBy": "Last *",
-     "sortDesc": true
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "interval": "15s"
-  },
-  {
-   "type": "timeseries",
-   "title": "Ожидание первого токена, с",
-   "description": "Сколько секунд прошло от запроса до начала ответа: ожидание в очереди (пока модель занята другим запросом) плюс чтение запроса. «В очереди» показан, только если ожидание было",
-   "datasource": {
-    "type": "loki",
-    "uid": "loki"
-   },
-   "gridPos": {
-    "x": 16,
-    "y": 6,
-    "w": 8,
-    "h": 10
-   },
-   "targets": [
-    {
-     "expr": "max by () (max_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json q=\"metrics.queue_time\", p=\"metrics.prompt_time\" | label_format v=`{{ addf .q .p }}` | unwrap v | __error__=\"\" [$__interval]))",
+     "expr": "avg_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json q=\"metrics.queue_time\", p=\"metrics.prompt_time\" | label_format v=`{{ addf .q .p }}` | unwrap v | __error__=\"\" [5m]) by ()",
      "legendFormat": "всего",
      "refId": "A",
      "datasource": {
@@ -469,7 +638,7 @@
      }
     },
     {
-     "expr": "max by () (max_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json v=\"metrics.queue_time\" | v > 0.1 | unwrap v | __error__=\"\" [$__interval]))",
+     "expr": "avg_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json v=\"metrics.queue_time\" | unwrap v | __error__=\"\" [5m]) by ()",
      "legendFormat": "из них в очереди",
      "refId": "B",
      "datasource": {
@@ -481,19 +650,52 @@
    "fieldConfig": {
     "defaults": {
      "unit": "s",
+     "min": 0,
      "decimals": 1,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
-      "drawStyle": "points",
-      "pointSize": 9,
-      "showPoints": "always",
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "всего"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "из них в очереди"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -511,33 +713,21 @@
      "sort": "desc"
     }
    },
-   "interval": "15s"
-  },
-  {
-   "type": "row",
-   "title": "Модель: ответы и память",
-   "collapsed": false,
-   "gridPos": {
-    "x": 0,
-    "y": 16,
-    "w": 24,
-    "h": 1
-   },
-   "panels": []
+   "interval": "1m"
   },
   {
    "type": "timeseries",
    "title": "Ответы по итогу, штук",
-   "description": "Каждый столбик — сколько ответов закончилось за 5 минут и как. Отменённые клиентом запросы не считаются",
+   "description": "Каждый столбик — сколько запросов закончилось за его промежуток времени и чем. «Отменён клиентом» — клиент закрыл соединение до конца ответа (например, не дождался очереди)",
    "datasource": {
     "type": "loki",
     "uid": "loki"
    },
    "gridPos": {
-    "x": 0,
-    "y": 17,
+    "x": 8,
+    "y": 16,
     "w": 8,
-    "h": 10
+    "h": 9
    },
    "targets": [
     {
@@ -575,24 +765,111 @@
       "type": "loki",
       "uid": "loki"
      }
+    },
+    {
+     "expr": "sum(count_over_time({event=\"generation_end\"} |= `\"partial\": true` [$__interval]))",
+     "legendFormat": "отменён клиентом",
+     "refId": "E",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "unit": "short",
+     "min": 0,
      "decimals": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 60,
+      "fillOpacity": 70,
       "drawStyle": "bars",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "normal"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "нормально завершён"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "упёрся в лимит длины"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "yellow"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "оборван: зацикливание"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "прочее"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "отменён клиентом"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -615,44 +892,62 @@
   {
    "type": "timeseries",
    "title": "DFlash2 угадал токенов, %",
-   "description": "Доля черновых токенов маленькой модели-помощника, которые основная модель приняла, в каждом ответе. Чем выше, тем быстрее ответ",
+   "description": "Доля черновых токенов маленькой модели-помощника, которые основная модель приняла (по ответам за 10 минут). Чем выше, тем быстрее ответ. Обычно 25–75%",
    "datasource": {
-    "type": "loki",
-    "uid": "loki"
+    "type": "prometheus",
+    "uid": "prom"
    },
    "gridPos": {
-    "x": 8,
-    "y": 17,
+    "x": 16,
+    "y": 16,
     "w": 8,
-    "h": 10
+    "h": 9
    },
    "targets": [
     {
-     "expr": "max by () (max_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json a=\"metrics.draft_accept\", r=\"metrics.draft_reject\" | a > 0 | label_format v=`{{ divf (mulf 100 .a) (addf .a .r) }}` | unwrap v | __error__=\"\" [$__interval]))",
-     "legendFormat": "угадано",
+     "expr": "100 * sum(increase(llm_draft_accepted_tokens_total[10m])) / ((sum(increase(llm_draft_accepted_tokens_total[10m])) + sum(increase(llm_draft_rejected_tokens_total[10m]))) > 0)",
+     "legendFormat": "угадано за 10 мин",
      "refId": "A",
      "datasource": {
-      "type": "loki",
-      "uid": "loki"
+      "type": "prometheus",
+      "uid": "prom"
      }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "unit": "percent",
+     "min": 0,
      "decimals": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
-      "drawStyle": "points",
-      "pointSize": 9,
-      "showPoints": "always",
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "угадано за 10 мин"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -669,27 +964,38 @@
      "mode": "multi",
      "sort": "desc"
     }
+   }
+  },
+  {
+   "type": "row",
+   "title": "Модель: память и кэш",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 25,
+    "w": 24,
+    "h": 1
    },
-   "interval": "15s"
+   "panels": []
   },
   {
    "type": "timeseries",
-   "title": "Память контекста, токенов",
-   "description": "Сколько токенов диалога сейчас держит модель. Когда «занято» подходит к максимуму, длинный диалог надо сжимать",
+   "title": "Размер текущего запроса, токенов",
+   "description": "Сколько токенов занимает запрос, который модель сейчас обрабатывает (весь диалог с ответом). Когда подходит к лимиту, диалог надо сжимать, иначе запрос не поместится",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
    },
    "gridPos": {
-    "x": 16,
-    "y": 17,
+    "x": 0,
+    "y": 26,
     "w": 8,
-    "h": 10
+    "h": 9
    },
    "targets": [
     {
-     "expr": "llm_cache_used_tokens",
-     "legendFormat": "занято сейчас",
+     "expr": "max(max_over_time(llm_cache_used_tokens[$__rate_interval]))",
+     "legendFormat": "текущий запрос",
      "refId": "A",
      "datasource": {
       "type": "prometheus",
@@ -697,8 +1003,8 @@
      }
     },
     {
-     "expr": "llm_context_tokens",
-     "legendFormat": "максимум (112K)",
+     "expr": "max(llm_context_tokens)",
+     "legendFormat": "лимит одного запроса",
      "refId": "B",
      "datasource": {
       "type": "prometheus",
@@ -709,18 +1015,302 @@
    "fieldConfig": {
     "defaults": {
      "unit": "short",
+     "min": 0,
+     "decimals": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "текущий запрос"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "лимит одного запроса"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Кэш запросов, токенов",
+   "description": "Сколько уже прочитанного текста модель держит, чтобы не читать его заново в следующем запросе того же диалога",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 26,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "max(llm_cache_reusable_tokens)",
+     "legendFormat": "в видеопамяти",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "max(llm_cache_capacity_tokens)",
+     "legendFormat": "вместимость видеопамяти",
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "max(llm_cache_ram_reusable_tokens)",
+     "legendFormat": "в RAM",
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "max(llm_cache_ram_capacity_tokens)",
+     "legendFormat": "вместимость RAM",
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "в видеопамяти"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "вместимость видеопамяти"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "dark-green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "в RAM"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "вместимость RAM"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "dark-blue"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Запрос взят из кэша, %",
+   "description": "Какая часть запросов за 10 минут не читалась заново, а взялась из кэша. Чем выше, тем быстрее начинается ответ",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 26,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "100 * sum(increase(llm_cache_pages_reused_total[10m])) / (sum(increase(llm_cache_pages_total[10m])) > 0)",
+     "legendFormat": "всего",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "100 * sum(increase(llm_cache_pages_from_ram_total[10m])) / (sum(increase(llm_cache_pages_total[10m])) > 0)",
+     "legendFormat": "из них из RAM",
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "decimals": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "всего"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "из них из RAM"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -745,7 +1335,7 @@
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 27,
+    "y": 35,
     "w": 24,
     "h": 1
    },
@@ -753,7 +1343,7 @@
   },
   {
    "type": "timeseries",
-   "title": "Видеопамять, МиБ",
+   "title": "Видеопамять",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -761,9 +1351,9 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 28,
+    "y": 36,
     "w": 8,
-    "h": 10
+    "h": 9
    },
    "targets": [
     {
@@ -787,19 +1377,52 @@
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "decmbytes",
+     "unit": "mbytes",
+     "min": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "занято"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "всего"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -828,9 +1451,9 @@
    },
    "gridPos": {
     "x": 8,
-    "y": 28,
+    "y": 36,
     "w": 8,
-    "h": 10
+    "h": 9
    },
    "targets": [
     {
@@ -846,18 +1469,36 @@
    "fieldConfig": {
     "defaults": {
      "unit": "percent",
+     "min": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "загрузка"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "yellow"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -878,22 +1519,98 @@
   },
   {
    "type": "timeseries",
-   "title": "Мощность (Вт) и температура (°C)",
-   "description": "",
+   "title": "Температура GPU",
+   "description": "Выше ~83 °C видеокарта сама снижает частоту, и генерация замедляется",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
    },
    "gridPos": {
     "x": 16,
-    "y": 28,
+    "y": 36,
     "w": 8,
-    "h": 10
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "llm_gpu_temp_celsius",
+     "legendFormat": "температура",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "min": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "температура"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Мощность GPU",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 45,
+    "w": 12,
+    "h": 9
    },
    "targets": [
     {
      "expr": "llm_gpu_power_watts",
-     "legendFormat": "Вт",
+     "legendFormat": "потребляет",
      "refId": "A",
      "datasource": {
       "type": "prometheus",
@@ -901,8 +1618,8 @@
      }
     },
     {
-     "expr": "llm_gpu_temp_celsius",
-     "legendFormat": "°C",
+     "expr": "llm_gpu_power_limit_watts",
+     "legendFormat": "лимит",
      "refId": "B",
      "datasource": {
       "type": "prometheus",
@@ -912,19 +1629,153 @@
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "watt",
+     "min": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "потребляет"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "лимит"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Частота ядра GPU",
+   "description": "Если под нагрузкой частота заметно ниже максимума — видеокарта ограничена по мощности или температуре",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 45,
+    "w": 12,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "llm_gpu_sm_clock_mhz",
+     "legendFormat": "сейчас",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "llm_gpu_sm_clock_max_mhz",
+     "legendFormat": "максимум",
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix: МГц",
+     "min": 0,
+     "decimals": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "сейчас"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "максимум"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -945,11 +1796,11 @@
   },
   {
    "type": "row",
-   "title": "Сервер: процессор, память, диск, сеть",
+   "title": "Контейнер: память, процессор, диск, сеть (в пределах лимитов Vast)",
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 38,
+    "y": 54,
     "w": 24,
     "h": 1
    },
@@ -957,23 +1808,41 @@
   },
   {
    "type": "timeseries",
-   "title": "CPU, %",
-   "description": "",
+   "title": "Оперативная память",
+   "description": "Память нашего контейнера (не всего сервера Vast). «Программы» нельзя освободить; остальное — файловый кэш, ядро отдаёт его само. Если «программы» дойдут до лимита, процесс будет убит",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
    },
    "gridPos": {
     "x": 0,
-    "y": 39,
-    "w": 6,
-    "h": 10
+    "y": 55,
+    "w": 8,
+    "h": 9
    },
    "targets": [
     {
-     "expr": "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])))",
-     "legendFormat": "занято",
+     "expr": "llm_container_memory_used_bytes",
+     "legendFormat": "занято всего",
      "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "llm_container_memory_programs_bytes",
+     "legendFormat": "из них программы",
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "llm_container_memory_limit_bytes",
+     "legendFormat": "лимит контейнера",
+     "refId": "C",
      "datasource": {
       "type": "prometheus",
       "uid": "prom"
@@ -982,19 +1851,67 @@
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "percent",
+     "unit": "bytes",
+     "min": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "занято всего"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "из них программы"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "лимит контейнера"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -1015,21 +1932,21 @@
   },
   {
    "type": "timeseries",
-   "title": "Оперативная память",
-   "description": "",
+   "title": "Процессор, ядер",
+   "description": "Сколько ядер процессора занимает контейнер",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
    },
    "gridPos": {
-    "x": 6,
-    "y": 39,
-    "w": 6,
-    "h": 10
+    "x": 8,
+    "y": 55,
+    "w": 8,
+    "h": 9
    },
    "targets": [
     {
-     "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+     "expr": "rate(llm_container_cpu_seconds_total[$__rate_interval])",
      "legendFormat": "занято",
      "refId": "A",
      "datasource": {
@@ -1038,8 +1955,8 @@
      }
     },
     {
-     "expr": "node_memory_MemTotal_bytes",
-     "legendFormat": "всего",
+     "expr": "llm_container_cpu_limit_cores",
+     "legendFormat": "лимит контейнера",
      "refId": "B",
      "datasource": {
       "type": "prometheus",
@@ -1049,19 +1966,53 @@
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "bytes",
+     "unit": "short",
+     "min": 0,
+     "decimals": 1,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "занято"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "лимит контейнера"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -1089,10 +2040,10 @@
     "uid": "prom"
    },
    "gridPos": {
-    "x": 12,
-    "y": 39,
-    "w": 6,
-    "h": 10
+    "x": 16,
+    "y": 55,
+    "w": 8,
+    "h": 9
    },
    "targets": [
     {
@@ -1117,18 +2068,151 @@
    "fieldConfig": {
     "defaults": {
      "unit": "bytes",
+     "min": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "занято"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "всего"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Диск: чтение и запись",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 64,
+    "w": 12,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "rate(llm_container_disk_read_bytes_total[$__rate_interval])",
+     "legendFormat": "чтение",
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "rate(llm_container_disk_written_bytes_total[$__rate_interval])",
+     "legendFormat": "запись",
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "min": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "drawStyle": "line",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "чтение"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "запись"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -1150,20 +2234,20 @@
   {
    "type": "timeseries",
    "title": "Сеть",
-   "description": "",
+   "description": "Сеть контейнера: приём — в основном скачивание модели при старте",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
    },
    "gridPos": {
-    "x": 18,
-    "y": 39,
-    "w": 6,
-    "h": 10
+    "x": 12,
+    "y": 64,
+    "w": 12,
+    "h": 9
    },
    "targets": [
     {
-     "expr": "sum(rate(node_network_receive_bytes_total{device!=\"lo\"}[1m]))",
+     "expr": "sum(rate(node_network_receive_bytes_total{device!=\"lo\"}[$__rate_interval]))",
      "legendFormat": "приём",
      "refId": "A",
      "datasource": {
@@ -1172,7 +2256,7 @@
      }
     },
     {
-     "expr": "sum(rate(node_network_transmit_bytes_total{device!=\"lo\"}[1m]))",
+     "expr": "sum(rate(node_network_transmit_bytes_total{device!=\"lo\"}[$__rate_interval]))",
      "legendFormat": "отдача",
      "refId": "B",
      "datasource": {
@@ -1184,18 +2268,51 @@
    "fieldConfig": {
     "defaults": {
      "unit": "Bps",
+     "min": 0,
      "custom": {
       "lineWidth": 2,
-      "fillOpacity": 10,
+      "fillOpacity": 12,
       "drawStyle": "line",
-      "pointSize": 5,
-      "showPoints": "auto",
+      "lineInterpolation": "smooth",
+      "showPoints": "never",
+      "spanNulls": false,
       "stacking": {
        "mode": "none"
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "приём"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "отдача"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -1216,11 +2333,11 @@
   },
   {
    "type": "row",
-   "title": "Сервисы мониторинга и модели",
+   "title": "Сервисы",
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 49,
+    "y": 73,
     "w": 24,
     "h": 1
    },
@@ -1236,13 +2353,14 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 50,
+    "y": 74,
     "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"tabby\"}) or vector(0)",
+     "expr": "max(max_over_time(up{job=\"tabby\"}[1m])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1285,7 +2403,8 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
@@ -1298,13 +2417,14 @@
    },
    "gridPos": {
     "x": 3,
-    "y": 50,
+    "y": 74,
     "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"gpu\"}) or vector(0)",
+     "expr": "max(max_over_time(up{job=\"gpu\"}[1m])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1347,7 +2467,8 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
@@ -1360,13 +2481,14 @@
    },
    "gridPos": {
     "x": 6,
-    "y": 50,
+    "y": 74,
     "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"node\"}) or vector(0)",
+     "expr": "max(max_over_time(up{job=\"node\"}[1m])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1409,7 +2531,8 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
@@ -1422,13 +2545,14 @@
    },
    "gridPos": {
     "x": 9,
-    "y": 50,
-    "w": 4,
+    "y": 74,
+    "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"prometheus\"}) or vector(0)",
+     "expr": "max(max_over_time(up{job=\"prometheus\"}[1m])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1471,7 +2595,8 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
@@ -1483,14 +2608,15 @@
     "uid": "prom"
    },
    "gridPos": {
-    "x": 13,
-    "y": 50,
+    "x": 12,
+    "y": 74,
     "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"loki\"}) or vector(0)",
+     "expr": "max(max_over_time(up{job=\"loki\"}[1m])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1533,7 +2659,8 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
@@ -1545,14 +2672,15 @@
     "uid": "prom"
    },
    "gridPos": {
-    "x": 16,
-    "y": 50,
+    "x": 15,
+    "y": 74,
     "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"alloy\"}) or vector(0)",
+     "expr": "max(max_over_time(up{job=\"alloy\"}[1m])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1595,26 +2723,78 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   },
   {
    "type": "stat",
-   "title": "Grafana",
-   "description": "",
+   "title": "Перезапусков модели, сутки",
+   "description": "Сколько раз сервер модели падал и был перезапущен автоматически. Причина — в логах tabby перед строкой «TabbyAPI exited»",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 74,
+    "w": 3,
+    "h": 4
+   },
+   "targets": [
+    {
+     "expr": "sum(count_over_time({service=\"tabby\"} |= \"TabbyAPI exited\" [24h])) or vector(0)",
+     "legendFormat": "",
+     "refId": "A",
+     "instant": true,
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "red"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "orientation": "vertical"
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Убито по памяти, сутки",
+   "description": "Сколько процессов ядро убило из-за нехватки памяти контейнера за сутки. Норма — 0",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
    },
    "gridPos": {
-    "x": 19,
-    "y": 50,
+    "x": 21,
+    "y": 74,
     "w": 3,
     "h": 4
    },
    "targets": [
     {
-     "expr": "max(up{job=\"grafana\"}) or vector(0)",
+     "expr": "sum(increase(llm_container_oom_kills_total[24h])) or vector(0)",
+     "legendFormat": "",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -1629,23 +2809,9 @@
      "decimals": 0,
      "color": {
       "mode": "fixed",
-      "fixedColor": "blue"
+      "fixedColor": "red"
      },
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
-        "0": {
-         "text": "не работает",
-         "color": "red"
-        },
-        "1": {
-         "text": "работает",
-         "color": "green"
-        }
-       }
-      }
-     ]
+     "mappings": []
     },
     "overrides": []
    },
@@ -1657,7 +2823,8 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "orientation": "vertical"
    }
   }
  ],

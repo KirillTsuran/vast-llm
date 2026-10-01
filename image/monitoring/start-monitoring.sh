@@ -2,6 +2,8 @@
 # Monitoring stack on the GPU machine. Everything listens on 127.0.0.1; Grafana is reached through the app's SSH tunnel.
 # Each service is restarted if it exits. Data is kept at most 3 days (and disappears with the machine on Down).
 L=/var/log/llm; mkdir -p $L/dialogs /var/lib/prometheus /var/lib/loki /var/lib/alloy /var/lib/grafana
+# Grafana logs an error at startup for every provisioning directory that is missing
+mkdir -p /opt/monitoring/provisioning/alerting /opt/monitoring/provisioning/plugins
 forever() { local name=$1; shift; ( while true; do "$@" >> $L/$name.log 2>&1; echo "$(date) $name exited, restart in 5s" >> $L/$name.log; sleep 5; done ) & }
 forever gpu_exporter python3 /opt/monitoring/gpu_exporter.py
 # overlay is NOT excluded (default excludes it), so the container's root disk is visible
