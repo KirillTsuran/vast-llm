@@ -2,6 +2,9 @@ global:
   scrape_interval: 5s
 scrape_configs:
   - job_name: tabby
+    # the model server answers /metrics between generation steps; a long prompt chunk can delay it by several seconds
+    scrape_interval: 10s
+    scrape_timeout: 9s
     metrics_path: /metrics
     static_configs: [{targets: ['127.0.0.1:8080']}]
   - job_name: gpu

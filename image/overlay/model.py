@@ -1746,6 +1746,9 @@ class ExllamaV3Container:
                     job_status.started(prefill_cached_tokens)
                     prefill_start_time = time.time()
                 elif stage == "prefill":
+                    # Progress also covers cached pages the job skips during prefill, so the
+                    # live metrics in serve.py need the cached count as of this event
+                    job_status.cached_now = self._job_cached_tokens(job)
                     job_status.prefill(result.get("curr_progress", 0))
                     if return_progress and prefill_start_time is not None:
                         # Time since the engine began prefill for this job. The
@@ -1825,6 +1828,7 @@ class ExllamaV3Container:
                     if params.logprobs > 0:
                         self.handle_logprobs(result, generation)
 
+                    job_status.cached_now = self._job_cached_tokens(job)
                     job_status.generated(generated_tokens)
                     yield generation
 
