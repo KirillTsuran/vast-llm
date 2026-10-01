@@ -73,6 +73,7 @@ type App struct {
 	signer  ssh.Signer
 	pub     string
 	busy    atomic.Bool
+	cancel  atomic.Bool
 	active  atomic.Int64
 	lastUse atomic.Int64
 	readyAt time.Time
@@ -373,6 +374,9 @@ func (a *App) dial(id int, pinned string, boot time.Duration, stop *atomic.Bool)
 	var running time.Time
 	lastErr := errors.New("instance did not start in time")
 	for time.Now().Before(deadline) {
+		if a.cancel.Load() {
+			return nil, "", errors.New("cancelled by Down")
+		}
 		if stop != nil && stop.Load() {
 			return nil, "", errors.New("cancelled: another host won")
 		}
@@ -440,6 +444,7 @@ func (a *App) up() {
 		return
 	}
 	defer a.busy.Store(false)
+	a.cancel.Store(false)
 	start := time.Now()
 	a.cleanupOrphans(a.st.ID)
 	if a.st.ID != 0 && a.client == nil {
@@ -459,7 +464,7 @@ func (a *App) up() {
 			go a.destroy(id)
 		}
 	}
-	for round := 1; a.st.ID == 0 && round <= 3; round++ {
+	for round := 1; a.st.ID == 0 && round <= 3 && !a.cancel.Load(); round++ {
 		offs, err := a.offers()
 		if err != nil || len(offs) == 0 {
 			a.setPhase("error", fmt.Sprintf("нет подходящих предложений: %v", err))
@@ -517,12 +522,15 @@ func (a *App) up() {
 			break
 		}
 	}
+	if a.cancel.Load() {
+		return
+	}
 	if a.st.ID == 0 {
 		a.setPhase("error", "не удалось поднять машину за 3 раунда")
 		return
 	}
 	deadline := time.Now().Add(40 * time.Minute)
-	for time.Now().Before(deadline) && a.st.ID != 0 {
+	for time.Now().Before(deadline) && a.st.ID != 0 && !a.cancel.Load() {
 		out, err := a.exec("cat /opt/llm/state 2>/dev/null; du -sh /opt/llm/models 2>/dev/null | cut -f1")
 		f := strings.Fields(out)
 		if err == nil && len(f) > 0 {
@@ -549,12 +557,13 @@ func (a *App) up() {
 		}
 		time.Sleep(5 * time.Second)
 	}
-	if a.st.ID != 0 {
+	if a.st.ID != 0 && !a.cancel.Load() {
 		a.setPhase("error", "модель не загрузилась за 40 минут")
 	}
 }
 
 func (a *App) down(reason string) {
+	a.cancel.Store(true) // interrupt a running Up
 	for !a.busy.CompareAndSwap(false, true) {
 		time.Sleep(time.Second)
 	}
