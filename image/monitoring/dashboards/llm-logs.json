@@ -25,7 +25,7 @@
   },
   {
    "type": "stat",
-   "title": "Строк логов за 15 мин",
+   "title": "Строк за 15 мин",
    "description": "",
    "datasource": {
     "type": "loki",
@@ -169,7 +169,7 @@
   },
   {
    "type": "stat",
-   "title": "Запросов за час (журнал)",
+   "title": "Запросов/час",
    "description": "",
    "datasource": {
     "type": "loki",

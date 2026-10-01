@@ -25,8 +25,8 @@
   },
   {
    "type": "stat",
-   "title": "Скорость генерации, ток/с",
-   "description": "Средняя скорость вывода за 2 минуты во время генерации",
+   "title": "Ток/с",
+   "description": "Скорость генерации модели: среднее за последние 15 минут (только время генерации)",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -39,7 +39,7 @@
    },
    "targets": [
     {
-     "expr": "sum(rate(llm_generated_tokens_total[2m])) / clamp_min(sum(rate(llm_decode_seconds_total[2m])), 0.001)",
+     "expr": "sum(increase(llm_generated_tokens_total[15m])) / clamp_min(sum(increase(llm_decode_seconds_total[15m])), 0.001)",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -73,7 +73,7 @@
   },
   {
    "type": "stat",
-   "title": "Запросов за час",
+   "title": "Запросов/час",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -121,7 +121,7 @@
   },
   {
    "type": "stat",
-   "title": "Сейчас генерирует",
+   "title": "В работе",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -169,7 +169,7 @@
   },
   {
    "type": "stat",
-   "title": "Ошибки зацикливания, 24 ч",
+   "title": "Зацикливания 24ч",
    "description": "generation_loop_detected: запрос оборван детектором повторов",
    "datasource": {
     "type": "prometheus",
@@ -217,7 +217,7 @@
   },
   {
    "type": "stat",
-   "title": "LoopBreak вмешался, 24 ч",
+   "title": "LoopBreak 24ч",
    "description": "Сколько раз защита остановила вырожденный повтор в рассуждении (запрос при этом продолжается)",
    "datasource": {
     "type": "prometheus",
@@ -265,7 +265,7 @@
   },
   {
    "type": "stat",
-   "title": "Загрузка GPU",
+   "title": "GPU",
    "description": "",
    "datasource": {
     "type": "prometheus",

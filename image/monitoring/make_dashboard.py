@@ -49,15 +49,15 @@ link = lambda uid, title: [{'title': title, 'type': 'link', 'url': f'/d/{uid}', 
 # ---------------- metrics ----------------
 m = Dash()
 m.row('Сейчас')
-m.stat('Скорость генерации, ток/с', 'sum(rate(llm_generated_tokens_total[2m])) / clamp_min(sum(rate(llm_decode_seconds_total[2m])), 0.001)', 0, 4, color='green',
-       desc='Средняя скорость вывода за 2 минуты во время генерации')
-m.stat('Запросов за час', 'sum(increase(llm_requests_completed_total[1h]))', 4, 4)
-m.stat('Сейчас генерирует', 'sum(llm_requests_processing) or vector(0)', 8, 4, color='purple')
-m.stat('Ошибки зацикливания, 24 ч', 'sum(increase(llm_requests_finished_total{reason="loop_detected"}[24h])) or vector(0)', 12, 4, color='red',
+m.stat('Ток/с', 'sum(increase(llm_generated_tokens_total[15m])) / clamp_min(sum(increase(llm_decode_seconds_total[15m])), 0.001)', 0, 4, color='green',
+       desc='Скорость генерации модели: среднее за последние 15 минут (только время генерации)')
+m.stat('Запросов/час', 'sum(increase(llm_requests_completed_total[1h]))', 4, 4)
+m.stat('В работе', 'sum(llm_requests_processing) or vector(0)', 8, 4, color='purple')
+m.stat('Зацикливания 24ч', 'sum(increase(llm_requests_finished_total{reason="loop_detected"}[24h])) or vector(0)', 12, 4, color='red',
        desc='generation_loop_detected: запрос оборван детектором повторов')
-m.stat('LoopBreak вмешался, 24 ч', 'sum(increase(llm_loopbreak_events_total[24h])) or vector(0)', 16, 4, color='orange',
+m.stat('LoopBreak 24ч', 'sum(increase(llm_loopbreak_events_total[24h])) or vector(0)', 16, 4, color='orange',
        desc='Сколько раз защита остановила вырожденный повтор в рассуждении (запрос при этом продолжается)')
-m.stat('Загрузка GPU', 'llm_gpu_util_percent', 20, 4, unit='percent', color='yellow')
+m.stat('GPU', 'llm_gpu_util_percent', 20, 4, unit='percent', color='yellow')
 m.y += 4
 m.row('Генерация')
 m.ts('Токены в секунду', [('sum(rate(llm_generated_tokens_total[1m]))', 'генерация'), ('sum(rate(llm_prompt_tokens_total[1m]))', 'обработка входа (новые токены)')], 0, 12)
@@ -97,11 +97,11 @@ VARS = [{'type': 'query', 'name': 'service', 'label': 'Сервис', 'datasourc
 SEL = '{service=~"$service"}'
 ERR = '(?i)(error|exception|traceback|failed|oom|loop_detected)'
 lg.row('Обзор')
-lg.stat('Строк логов за 15 мин', f'sum(count_over_time({SEL} [15m]))', 0, 6, ds=LOKI)
+lg.stat('Строк за 15 мин', f'sum(count_over_time({SEL} [15m]))', 0, 6, ds=LOKI)
 lg.stat('Ошибок за час', f'sum(count_over_time({SEL} |~ "{ERR}" [1h])) or vector(0)', 6, 6, color='red', ds=LOKI,
         desc='Строки со словами error, exception, traceback, failed, oom, loop_detected')
 lg.stat('Зацикливаний за сутки', 'sum(count_over_time({job="requests"} |= "loop_detected" [24h])) or vector(0)', 12, 6, color='orange', ds=LOKI)
-lg.stat('Запросов за час (журнал)', 'sum(count_over_time({job="requests", event="generation_end"} [1h])) or vector(0)', 18, 6, ds=LOKI)
+lg.stat('Запросов/час', 'sum(count_over_time({job="requests", event="generation_end"} [1h])) or vector(0)', 18, 6, ds=LOKI)
 lg.y += 4
 lg.ts('Объём логов по сервисам', [(f'sum by (service) (count_over_time({SEL} [1m]))', '{{service}}')], 0, 12, ds=LOKI, stack=True, bars=True)
 lg.ts('Ошибки по сервисам', [(f'sum by (service) (count_over_time({SEL} |~ "{ERR}" [5m]))', '{{service}}')], 12, 12, ds=LOKI, stack=True, bars=True)
