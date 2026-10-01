@@ -28,7 +28,7 @@ details summary{cursor:pointer;color:var(--mut)}
  <input id="key" type="password" placeholder="ключ из console.vast.ai → Keys" style="flex:1"><button class="p" id="savekey">Сохранить</button></div></div>
 <div class="card"><details><summary>Настройки</summary><div class="row" style="margin-top:10px">
  <select id="gpu"><option>RTX 3090</option><option>RTX 4090</option><option>RTX 5090</option><option>RTX A6000</option></select>
- <label>до $/ч <input id="dph" type="number" step="0.05" min="0.1" style="width:80px"></label>
+ <label>до $/ч (<span id="dphr"></span> ₽) <input id="dph" type="number" step="0.05" min="0.1" style="width:80px"></label>
  <label>простой, мин <input id="idle" type="number" min="0" style="width:70px"></label>
  <label><input id="dc" type="checkbox"> только дата-центры</label><button id="save">Сохранить</button></div></details></div>
 <div class="card"><pre id="log"></pre></div>
@@ -40,13 +40,15 @@ async function refresh(){let s;try{s=await (await fetch('/api/status')).json()}c
  $('st').className='card '+(s.phase=='ready'?'ready':s.phase=='error'?'error':s.phase=='off'?'':'busy');
  $('phase').textContent=names[s.phase]||s.phase;$('msg').textContent=s.msg||'';
  const i=s.instance,rows=[['ZCode URL','<code>'+s.endpoint+'</code>'],['Модель','<code>'+s.model+'</code>']];
- if(i)rows.push(['Машина',`#${i.id} · ${i.gpu} · ${i.geo}`],['Цена',`$${i.dph.toFixed(3)}/ч · работает ${i.uptime_min} мин · ≈ $${i.spent}`]);
- if(s.idle_min!=null)rows.push(['Простой',`${s.idle_min} из ${s.cfg.idle_minutes} мин · активных запросов ${s.active_requests}`]);
+ if(i)rows.push(['Машина',`#${i.id} · ${i.gpu} · ${i.geo}`],['Цена',`${i.dph_rub} ₽/ч ($${i.dph.toFixed(3)}) · работает ${i.uptime_min} мин · потрачено ≈ ${i.spent_rub} ₽ ($${i.spent})`]);
+ if(s.idle_min!=null)rows.push(['Простой',`${s.idle_min} из ${s.cfg.idle_minutes} мин без запросов → потом машина удалится сама · сейчас запросов ${s.active_requests}`]);
+ rows.push(['Курс',`${s.usd_rub.toFixed(2)} ₽/$ (ЦБ)`]);
  $('info').innerHTML=rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('');
  const busy=['renting','booting','downloading','loading','stopping'].includes(s.phase);
  $('up').disabled=busy||s.phase=='ready'||!s.configured;$('down').disabled=!i||s.phase=='stopping';
  $('keycard').hidden=s.configured;$('log').textContent=s.logs.join('\n');
- if(first){first=false;$('gpu').value=s.cfg.gpu;$('dph').value=s.cfg.max_dph;$('idle').value=s.cfg.idle_minutes;$('dc').checked=s.cfg.datacenter_only}}
+ if(first){first=false;$('gpu').value=s.cfg.gpu;$('dph').value=s.cfg.max_dph;$('idle').value=s.cfg.idle_minutes;$('dc').checked=s.cfg.datacenter_only}
+ $('dphr').textContent=Math.round(+$('dph').value*s.usd_rub)}
 $('up').onclick=()=>post('/api/up');$('down').onclick=()=>post('/api/down');
 $('savekey').onclick=()=>post('/api/config',{vast_api_key:$('key').value});
 $('save').onclick=()=>post('/api/config',{gpu:$('gpu').value,max_dph:+$('dph').value,idle_minutes:+$('idle').value,datacenter_only:$('dc').checked});

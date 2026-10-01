@@ -21,6 +21,6 @@ RUN SP=$(python -c 'import exllamav3,os;print(os.path.dirname(exllamav3.__file__
     && cp /tmp/overlay/observability.py /tmp/overlay/serve.py /app/ \
     && python /tmp/lb/patch_tabby.py /app && rm -rf /tmp/overlay /tmp/lb
 COPY tabby-config.yml /app/config.yml
-COPY start.sh download.py /opt/llm/
+COPY start.sh entry.sh download.py /opt/llm/
 COPY manifests/ /opt/llm/manifests/
-RUN chmod +x /opt/llm/start.sh
+RUN chmod +x /opt/llm/start.sh /opt/llm/entry.sh

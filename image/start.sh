@@ -1,7 +1,7 @@
 #!/bin/bash
 # Vast onstart: download pinned weights, start TabbyAPI on 127.0.0.1:8080 (reachable only via the SSH tunnel),
 # and a watchdog that stops paying if the Windows app disappears (no heartbeat).
-L=/var/log/llm; S=/opt/llm/state; mkdir -p $L
+L=/var/log/llm; S=/opt/llm/state; mkdir -p $L; set -a; . /opt/llm/vast.env 2>/dev/null; set +a
 pgrep -f "python serve.py" >/dev/null && exit 0
 echo downloading > $S
 if ! python3 /opt/llm/download.py qwen3.8-27b-uncensored dflash > $L/download.log 2>&1; then echo download-failed > $S; exit 1; fi
