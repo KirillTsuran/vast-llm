@@ -53,8 +53,8 @@ link = lambda uid, title: [{'title': title, 'type': 'link', 'url': f'/d/{uid}', 
 # ---------------- metrics ----------------
 m = Dash()
 m.row('Сейчас')
-m.stat('Скорость, ток/с', 'sum(increase(llm_generated_tokens_total[15m])) / clamp_min(sum(increase(llm_decode_seconds_total[15m])), 0.001)', 0, 4, color='green',
-       desc='Сколько токенов в секунду пишет модель (среднее за 15 минут, только пока она пишет)')
+m.stat('Скорость, ток/с', 'sum(increase(llm_generated_tokens_total[1h])) / clamp_min(sum(increase(llm_decode_seconds_total[1h])), 0.001)', 0, 4, color='green',
+       desc='Сколько токенов в секунду пишет модель: среднее за последний час, только пока она пишет (простой не учитывается)')
 m.stat('Ответов за час', 'sum(increase(llm_requests_completed_total[1h]))', 4, 4)
 m.stat('Пишет сейчас', 'sum(llm_requests_processing) or vector(0)', 8, 4, color='purple', desc='Сколько запросов модель обрабатывает прямо сейчас (0 или 1)')
 m.stat('Зацикливаний за сутки', 'sum(increase(llm_requests_finished_total{reason="loop_detected"}[24h])) or vector(0)', 12, 4, color='red',

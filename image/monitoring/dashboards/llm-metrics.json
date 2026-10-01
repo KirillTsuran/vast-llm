@@ -26,7 +26,7 @@
   {
    "type": "stat",
    "title": "Скорость, ток/с",
-   "description": "Сколько токенов в секунду пишет модель (среднее за 15 минут, только пока она пишет)",
+   "description": "Сколько токенов в секунду пишет модель: среднее за последний час, только пока она пишет (простой не учитывается)",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -39,7 +39,7 @@
    },
    "targets": [
     {
-     "expr": "sum(increase(llm_generated_tokens_total[15m])) / clamp_min(sum(increase(llm_decode_seconds_total[15m])), 0.001)",
+     "expr": "sum(increase(llm_generated_tokens_total[1h])) / clamp_min(sum(increase(llm_decode_seconds_total[1h])), 0.001)",
      "refId": "A",
      "instant": true,
      "datasource": {
