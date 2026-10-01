@@ -39,7 +39,7 @@
    },
    "targets": [
     {
-     "expr": "sum(count_over_time({job=\"requests\", event=\"generation_end\"} [1h])) or vector(0)",
+     "expr": "sum(count_over_time({event=\"generation_end\"} !~ `\"partial\": true` [1h])) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -135,7 +135,7 @@
    },
    "targets": [
     {
-     "expr": "sum(count_over_time({job=\"requests\", event=\"generation_end\"} |= \"loop_detected\" [24h])) or vector(0)",
+     "expr": "sum(count_over_time({event=\"generation_end\"} !~ `\"partial\": true` | json reason=\"metrics.eos_reason\" | reason=\"loop_detected\" [24h])) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -279,6 +279,8 @@
       "lineWidth": 2,
       "fillOpacity": 60,
       "drawStyle": "bars",
+      "pointSize": 5,
+      "showPoints": "auto",
       "stacking": {
        "mode": "normal"
       }
@@ -335,6 +337,8 @@
       "lineWidth": 2,
       "fillOpacity": 60,
       "drawStyle": "bars",
+      "pointSize": 5,
+      "showPoints": "auto",
       "stacking": {
        "mode": "normal"
       }
