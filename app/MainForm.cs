@@ -5,16 +5,25 @@ namespace VastLLM;
 static class Program
 {
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
+        bool tray = args.Contains("--tray");
         using var mutex = new Mutex(true, "VastLLM-single-instance", out bool first);
         if (!first) // already running: ask the first copy to show its window
         {
-            try { EventWaitHandle.OpenExisting("VastLLM-show").Set(); } catch { }
+            if (!tray) try { EventWaitHandle.OpenExisting("VastLLM-show").Set(); } catch { }
             return;
         }
+        // every way the program can end leaves a line in vast-llm.log
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Core.Append("ОШИБКА в окне программы (программа продолжает работу): " + e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Core.Append("АВАРИЙНОЕ ЗАВЕРШЕНИЕ: " + e.ExceptionObject);
+        TaskScheduler.UnobservedTaskException += (_, e) => { Core.Append("ОШИБКА в фоновой задаче: " + e.Exception); e.SetObserved(); };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Core.Append("процесс программы завершён");
+        Microsoft.Win32.SystemEvents.SessionEnding += (_, e) => Core.Append($"Windows завершает сеанс ({e.Reason})");
+        Core.Append($"запуск VastLLM {Application.ProductVersion.Split('+')[0]}, pid {Environment.ProcessId}{(tray ? ", автозапуск в трей" : "")}");
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+        Application.Run(new MainForm(tray));
     }
 }
 
@@ -33,9 +42,10 @@ public class MainForm : Form
     readonly System.Windows.Forms.Timer ui = new() { Interval = 1000 }, tick = new() { Interval = 30000 };
     bool exiting;
 
-    public MainForm()
+    public MainForm(bool startInTray = false)
     {
         Text = "VastLLM — GPU для ZCode"; Width = 640; Height = 480; StartPosition = FormStartPosition.CenterScreen;
+        if (startInTray) { WindowState = FormWindowState.Minimized; ShowInTaskbar = false; Shown += (_, _) => { Hide(); ShowInTaskbar = true; }; }
         Icon = SystemIcons.Application;
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12), WrapContents = false };
         var urlRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
@@ -103,12 +113,20 @@ public class MainForm : Form
 
     async void OnClosing(object sender, FormClosingEventArgs e)
     {
-        if (exiting || core.AllRented().Count == 0) { tray.Visible = false; return; }
+        if (exiting) { tray.Visible = false; return; }
+        if (core.AllRented().Count == 0) { core.Log($"выход из программы ({e.CloseReason}), машин нет"); tray.Visible = false; return; }
+        // Windows shutdown / Task Manager: no dialog (it would block them); machines stay and are picked up on next start
+        if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing)
+        {
+            core.Log($"выход из программы ({e.CloseReason}), машины остаются и будут подхвачены при следующем запуске");
+            tray.Visible = false; return;
+        }
         e.Cancel = true;
         var r = MessageBox.Show($"Арендовано машин: {core.AllRented().Count} (≈{core.AllRented().Sum(x => x.Dph) * core.Cfg.UsdRub:F0} ₽/ч).\n\nДа — удалить машины и выйти\nНет — выйти, машины останутся и будут оплачиваться; при следующем запуске программа их подхватит\nОтмена — не выходить",
             "VastLLM", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
         if (r == DialogResult.Cancel) return;
         if (r == DialogResult.Yes) { Show(); await core.Down("выход из программы"); }
+        else core.Log("выход из программы по кнопке «Нет»: машины остаются и оплачиваются, туннель закрыт");
         exiting = true; tray.Visible = false; Close();
     }
 }

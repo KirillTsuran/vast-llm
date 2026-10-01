@@ -23,6 +23,8 @@ public class Config
     [JsonPropertyName("image")] public string Image { get; set; } = "ghcr.io/kirilltsuran/vast-llm:latest";
     [JsonPropertyName("model")] public string Model { get; set; } = "qwen3.8-27b-uncensored";
     [JsonPropertyName("usd_rub")] public double UsdRub { get; set; } = 83.56;
+    // start with Windows (minimized to the tray) and reconnect to the rented machine by itself
+    [JsonPropertyName("autostart")] public bool Autostart { get; set; } = true;
 }
 
 public class State
@@ -103,9 +105,28 @@ public class Core
 
     public void Log(string s)
     {
-        var line = DateTime.Now.ToString("HH:mm:ss ") + s;
-        try { File.AppendAllText(P("vast-llm.log"), DateTime.Now.ToString("yyyy-MM-dd ") + line + Environment.NewLine); } catch { }
-        Logged?.Invoke(line);
+        Append(s);
+        Logged?.Invoke(DateTime.Now.ToString("HH:mm:ss ") + s);
+    }
+    // the log file only; usable before the window exists and from crash handlers
+    public static void Append(string s)
+    {
+        try { File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "vast-llm.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + s + Environment.NewLine); } catch { }
+    }
+
+    // HKCU Run entry follows config.json "autostart"; --tray starts the window hidden
+    public void SyncAutostart()
+    {
+        const string run = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        try
+        {
+            using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(run, true);
+            var want = $"\"{Environment.ProcessPath}\" --tray";
+            var have = k?.GetValue("VastLLM") as string;
+            if (Cfg.Autostart && have != want) { k?.SetValue("VastLLM", want); Log("автозапуск при входе в Windows включён"); }
+            else if (!Cfg.Autostart && have != null) { k?.DeleteValue("VastLLM", false); Log("автозапуск выключен"); }
+        }
+        catch (Exception e) { Log("автозапуск: " + e.Message); }
     }
     void Set(string phase, string msg)
     {
@@ -279,6 +300,8 @@ public class Core
     {
         CloseClient();
         client = c;
+        // logged at once (the 30 s tick reconnects); a dead session is the usual reason ZCode sees ECONNREFUSED
+        c.ErrorOccurred += (_, e) => Log("туннель: SSH-сессия оборвалась — " + e.Exception.Message);
         fwd = new ForwardedPortLocal("127.0.0.1", (uint)Cfg.LocalPort, "127.0.0.1", 8080);
         fwd.RequestReceived += (_, _) => lastUse = DateTime.UtcNow;
         client.AddForwardedPort(fwd);
@@ -451,6 +474,7 @@ public class Core
         LoadKey(); LoadState();
         var err = LoadConfig();
         if (err != null) Set("error", err);
+        SyncAutostart();
         _ = RateAsync();
         if (Cfg.VastKey.Trim() == "") return;
         try
