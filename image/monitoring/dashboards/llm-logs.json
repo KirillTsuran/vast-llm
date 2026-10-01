@@ -183,7 +183,7 @@
    },
    "targets": [
     {
-     "expr": "sum(count_over_time({service=~\"$service\", event!~\"request_body|response_body\"} [15m]))",
+     "expr": "sum(count_over_time({service=~\"$service\", event!~\"request_body|response_body\"} [15m])) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {

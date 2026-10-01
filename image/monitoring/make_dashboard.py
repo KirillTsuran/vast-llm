@@ -112,7 +112,7 @@ lg.stat('Ответов за час', f'sum(count_over_time({ENDS} [1h])) or vec
 lg.stat('Ошибок в логах за час', f'sum(count_over_time({SEL} |~ `{ERR}` [1h])) or vector(0)', 6, 6, color='red', ds=LOKI,
         desc='Строки уровня error, exception, traceback, out of memory, loop_detected во всех сервисах')
 lg.stat('Зацикливаний за сутки', f'sum(count_over_time({ENDS} |= "loop_detected" [24h])) or vector(0)', 12, 6, color='orange', ds=LOKI)
-lg.stat('Строк логов за 15 мин', f'sum(count_over_time({SEL} [15m]))', 18, 6, ds=LOKI)
+lg.stat('Строк логов за 15 мин', f'sum(count_over_time({SEL} [15m])) or vector(0)', 18, 6, ds=LOKI)
 lg.y += 4
 lg.logs('Ответы модели (одна строка на ответ)',
         f'{ENDS} | json | line_format `итог: {{{{.metrics_eos_reason}}}} · вход {{{{.metrics_prompt_tokens}}}} ток (из кэша {{{{.metrics_cached_tokens}}}}) · '
