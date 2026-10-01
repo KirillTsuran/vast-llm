@@ -88,7 +88,7 @@ func main() {
 	a.logFile, _ = os.OpenFile(filepath.Join(a.dir, "vast-llm.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	a.cfg = Config{USDRUB: 83.56, GPU: "RTX 3090", MaxDPH: 0.40, LocalPort: 8080, UIPort: 8090, IdleMin: 30, MaxHours: 12,
 		Image: "ghcr.io/kirilltsuran/vast-llm:latest", Watchdog: 60, Model: "qwen3.8-27b-uncensored"}
-	readJSON(filepath.Join(a.dir, "config.json"), &a.cfg)
+	cfgErr := readJSON(filepath.Join(a.dir, "config.json"), &a.cfg)
 	readJSON(filepath.Join(a.dir, "state.json"), &a.st)
 	a.saveConfig()
 
@@ -99,12 +99,18 @@ func main() {
 		return
 	}
 	a.loadKey()
+	if cfgErr != nil && !os.IsNotExist(cfgErr) {
+		a.setPhase("error", "не удалось прочитать настройки: "+cfgErr.Error())
+	}
+	a.logf("запуск, настройки: %s, ключ Vast: %v", a.dir, a.cfg.VastKey != "")
 	go a.tunnel()
 	go a.rate()
 	go a.monitor()
 	if a.st.ID != 0 {
-		a.logf("found instance %d from previous session, reconnecting", a.st.ID)
+		a.logf("машина %d осталась с прошлого запуска, переподключаюсь", a.st.ID)
 		go a.up()
+	} else if a.cfg.VastKey != "" {
+		go a.cleanupOrphans(0)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -141,11 +147,12 @@ func (a *App) rate() {
 }
 
 // ---------- helpers ----------
-func readJSON(p string, v any) {
+func readJSON(p string, v any) error {
 	b, err := os.ReadFile(p)
-	if err == nil {
-		json.Unmarshal(b, v)
+	if err != nil {
+		return err
 	}
+	return json.Unmarshal(b, v)
 }
 func writeJSON(p string, v any) { b, _ := json.MarshalIndent(v, "", "  "); os.WriteFile(p, b, 0o600) }
 func (a *App) saveConfig()      { writeJSON(filepath.Join(a.dir, "config.json"), a.cfg) }
@@ -700,7 +707,7 @@ func (a *App) monitor() {
 // ---------- HTTP handlers ----------
 func (a *App) hStatus(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
-	logs := append([]string(nil), a.logs[max(0, len(a.logs)-40):]...)
+	logs := append([]string{}, a.logs[max(0, len(a.logs)-40):]...)
 	s := map[string]any{"phase": a.phase, "msg": a.msg, "configured": a.cfg.VastKey != "", "cfg": map[string]any{
 		"gpu": a.cfg.GPU, "max_dph": a.cfg.MaxDPH, "datacenter_only": a.cfg.Datacenter, "idle_minutes": a.cfg.IdleMin, "max_hours": a.cfg.MaxHours},
 		"endpoint": fmt.Sprintf("http://127.0.0.1:%d/v1", a.cfg.LocalPort), "model": a.cfg.Model, "tunnel": a.client != nil,
