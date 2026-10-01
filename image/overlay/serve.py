@@ -17,8 +17,9 @@ _counters={n:0.0 for n in ['llm_prompt_tokens_total','llm_generated_tokens_total
 # Live counters: the *_total counters above grow only when an answer ends, so rate() over them is not a speed.
 # These grow while the answer is being written, from the progress events the generation loop already sends
 # to the console status line (prompt position after each prefill chunk, generated token count after each chunk).
-# Tokens and the seconds spent on them are counted at the same events, so tokens/seconds over any window is the
-# real speed while the model works, and there is no value at all while it is idle.
+# Tokens and the seconds spent on them are counted together, so tokens/seconds over any window is the real speed
+# while the model works, and there is no value at all while it is idle. Events often arrive in bursts after the work
+# is done, so the two boundaries the engine records itself (prefill start, first answer token) come from its clock.
 import time as _time
 from common import status_display as _sd
 _JS=_sd.JobStatus
@@ -26,34 +27,37 @@ _js_started,_js_prefill,_js_generated=_JS.started,_JS.prefill,_JS.generated
 def _live_add(name,n):
  if n>0:
   with _lock:_counters[name]+=n
-def _live_tick(self,name=None):
- # seconds since this job's previous progress event; a long gap means the job was paused, not working
- now=_time.monotonic();prev=getattr(self,'_live_t',None);self._live_t=now
- if name and prev is not None and now-prev<30:_live_add(name,now-prev)
-def _live_read(self,position):
+def _live_tick(self,name=None,start=None,end=None):
+ # seconds from this job's previous mark (or from `start`, if earlier) to `end` (default: now); the mark moves to the
+ # end. A gap over 30 s means the job was paused, not working
+ now=end or _time.time();prev=getattr(self,'_live_t',None);self._live_t=now
+ if start is not None and prev is not None:prev=min(prev,start)
+ if name and prev is not None and 0<now-prev<30:_live_add(name,now-prev)
+def _live_read(self,position,end=None):
  # prompt tokens really read = position reached minus the part taken from the cache; model.py sets cached_now at
  # every event because the job skips cached pages inside prefill, after the 'started' event
- read=position-getattr(self,'cached_now',getattr(self,'_live_cached',0))
  done=getattr(self,'_live_read_n',None)
- if done is None:return False
+ if done is None:return
+ read=position-getattr(self,'cached_now',getattr(self,'_live_cached',0))
+ start=None if getattr(self,'_live_read_timed',True) else getattr(self,'prefill_t0',None)
  if read>done:
   # a few leftover tokens (fully cached prompt, read together with the first answer token) say nothing about speed
-  _live_tick(self,'llm_live_prefill_seconds_total' if read-done>=64 else None)
-  _live_add('llm_live_prompt_tokens_total',read-done);self._live_read_n=read
+  _live_tick(self,'llm_live_prefill_seconds_total' if read-done>=64 else None,start,end)
+  _live_add('llm_live_prompt_tokens_total',read-done);self._live_read_n=read;self._live_read_timed=True
  else:
-  _live_tick(self)  # cache lookups/restores without new tokens are not reading time
- return True
+  _live_tick(self,None,None,end)  # cache lookups/restores without new tokens are not reading time
 def _started(self,cached_tokens):
- self._live_cached=cached_tokens;self._live_read_n=0;self._live_prompt_done=False
- self.__dict__.pop('cached_now',None)
- self._live_t=_time.monotonic()
+ self._live_cached=cached_tokens;self._live_read_n=0;self._live_prompt_done=False;self._live_read_timed=False
+ for k in ('cached_now','prefill_t0','gen_t0'):self.__dict__.pop(k,None)
+ self._live_t=_time.time()
  return _js_started(self,cached_tokens)
 def _prefill(self,progress):
- _live_read(self,progress)
+ _live_read(self,progress,getattr(self,'gen_t0',None))  # reading ends at the first token if it is already out
  return _js_prefill(self,progress)
 def _generated(self,gen_tokens):
- if not getattr(self,'_live_prompt_done',True):  # the last prefill chunk ends with the first token
-  _live_read(self,self.prompt_tokens);self._live_prompt_done=True
+ if not getattr(self,'_live_prompt_done',True):
+  # the prompt is finished with the first answer token: reading ends and writing starts at the engine's first-token time
+  _live_read(self,self.prompt_tokens,getattr(self,'gen_t0',None));self._live_prompt_done=True
  else:
   _live_tick(self,'llm_live_generate_seconds_total')
  _live_add('llm_live_generated_tokens_total',gen_tokens-getattr(self,'_live_gen',0))
