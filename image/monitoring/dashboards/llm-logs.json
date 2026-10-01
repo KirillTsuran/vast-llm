@@ -259,7 +259,7 @@
     "x": 0,
     "y": 14,
     "w": 12,
-    "h": 8
+    "h": 10
    },
    "targets": [
     {
@@ -288,11 +288,18 @@
    },
    "options": {
     "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
     },
     "tooltip": {
-     "mode": "multi"
+     "mode": "multi",
+     "sort": "desc"
     }
    }
   },
@@ -308,7 +315,7 @@
     "x": 12,
     "y": 14,
     "w": 12,
-    "h": 8
+    "h": 10
    },
    "targets": [
     {
@@ -337,11 +344,18 @@
    },
    "options": {
     "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
     },
     "tooltip": {
-     "mode": "multi"
+     "mode": "multi",
+     "sort": "desc"
     }
    }
   },
@@ -351,7 +365,7 @@
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 22,
+    "y": 24,
     "w": 24,
     "h": 1
    },
@@ -367,7 +381,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 23,
+    "y": 25,
     "w": 24,
     "h": 9
    },
@@ -399,7 +413,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 32,
+    "y": 34,
     "w": 24,
     "h": 14
    },

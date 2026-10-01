@@ -22,13 +22,16 @@ class Dash:
                                                          'mappings': mappings or []}, 'overrides': []},
                             'options': {'reduceOptions': {'calcs': ['lastNotNull']}, 'colorMode': 'value', 'graphMode': 'none', 'textMode': 'value'}})
 
-    def ts(self, title, targets, x, w, unit='short', h=8, desc='', stack=False, ds=PROM, bars=False, interval=None):
+    def ts(self, title, targets, x, w, unit='short', h=10, desc='', stack=False, ds=PROM, bars=False, interval=None):
         self.panels.append({'type': 'timeseries', 'title': title, 'description': desc, 'datasource': ds, 'gridPos': {'x': x, 'y': self.y, 'w': w, 'h': h},
                             'targets': [{'expr': e, 'legendFormat': l, 'refId': chr(65 + i), 'datasource': ds} for i, (e, l) in enumerate(targets)],
                             'fieldConfig': {'defaults': {'unit': unit, 'custom': {'lineWidth': 2, 'fillOpacity': 60 if bars else 10,
                                                                                   'drawStyle': 'bars' if bars else 'line',
                                                                                   'stacking': {'mode': 'normal' if stack else 'none'}}}, 'overrides': []},
-                            'options': {'legend': {'displayMode': 'list', 'placement': 'bottom'}, 'tooltip': {'mode': 'multi'}},
+                            # legend as a table: Last and Max, sorted by Last (largest first)
+                            'options': {'legend': {'displayMode': 'table', 'placement': 'bottom', 'calcs': ['lastNotNull', 'max'],
+                                                   'sortBy': 'Last *', 'sortDesc': True},
+                                        'tooltip': {'mode': 'multi', 'sort': 'desc'}},
                             **({'interval': interval} if interval else {})})
 
     def logs(self, title, expr, x, w, h=12, desc=''):
@@ -68,17 +71,17 @@ m.ts('Ответы по итогу, штук за минуту',
      [(f'sum(increase(llm_requests_finished_total{{reason="{r}"}}[1m])) or vector(0)', name) for r, name in REASONS] +
      [('sum(increase(llm_requests_finished_total{reason!~"stop_token|max_new_tokens|loop_detected"}[1m])) or vector(0)', 'прочее')],
      12, 12, stack=True, bars=True, interval='1m', desc='Каждый столбик — сколько ответов закончилось за минуту и как')
-m.y += 8
+m.y += 10
 m.ts('Память контекста, токенов', [('llm_cache_used_tokens', 'занято сейчас'), ('llm_context_tokens', 'максимум (112K)')], 0, 12,
      desc='Сколько токенов диалога сейчас держит модель. Когда «занято» подходит к максимуму, длинный диалог надо сжимать')
 m.ts('Ускорение DFlash2: угадано токенов, %', [('100 * sum(rate(llm_draft_accepted_tokens_total[2m])) / clamp_min(sum(rate(llm_draft_accepted_tokens_total[2m])) + sum(rate(llm_draft_rejected_tokens_total[2m])), 0.001)', 'угадано')],
      12, 12, unit='percent', desc='Доля токенов, которые маленькая модель-помощник угадала заранее. Чем выше, тем быстрее генерация')
-m.y += 8
+m.y += 10
 m.row('Видеокарта')
 m.ts('Видеопамять, МиБ', [('llm_gpu_mem_used_mib', 'занято'), ('llm_gpu_mem_total_mib', 'всего')], 0, 8, unit='decmbytes')
 m.ts('Загрузка GPU, %', [('llm_gpu_util_percent', 'загрузка')], 8, 8, unit='percent')
 m.ts('Мощность (Вт) и температура (°C)', [('llm_gpu_power_watts', 'Вт'), ('llm_gpu_temp_celsius', '°C')], 16, 8)
-m.y += 8
+m.y += 10
 m.row('Сервер: процессор, память, диск, сеть')
 m.ts('CPU, %', [('100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[1m])))', 'занято')], 0, 6, unit='percent')
 m.ts('Оперативная память', [('node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes', 'занято'), ('node_memory_MemTotal_bytes', 'всего')], 6, 6, unit='bytes')
@@ -86,7 +89,7 @@ m.ts('Диск /, занято', [('node_filesystem_size_bytes{mountpoint="/"} -
                        ('node_filesystem_size_bytes{mountpoint="/"}', 'всего')], 12, 6, unit='bytes')
 m.ts('Сеть', [('sum(rate(node_network_receive_bytes_total{device!="lo"}[1m]))', 'приём'), ('sum(rate(node_network_transmit_bytes_total{device!="lo"}[1m]))', 'отдача')],
      18, 6, unit='Bps')
-m.y += 8
+m.y += 10
 m.row('Сервисы мониторинга и модели')
 SERVICES = [('tabby', 'TabbyAPI (модель)'), ('gpu', 'Экспортёр GPU'), ('node', 'node_exporter'), ('prometheus', 'Prometheus'),
             ('loki', 'Loki'), ('alloy', 'Alloy'), ('grafana', 'Grafana')]
@@ -118,7 +121,7 @@ lg.logs('Ответы модели (одна строка на ответ)',
 lg.y += 9
 lg.ts('Объём логов по сервисам, строк в минуту', [(f'sum by (service) (count_over_time({SEL} [1m]))', '{{service}}')], 0, 12, ds=LOKI, stack=True, bars=True)
 lg.ts('Ошибки по сервисам, за 5 минут', [(f'sum by (service) (count_over_time({SEL} |~ `{ERR}` [5m]))', '{{service}}')], 12, 12, ds=LOKI, stack=True, bars=True)
-lg.y += 8
+lg.y += 10
 lg.row('Логи')
 lg.logs('Только ошибки', f'{SEL} |~ `{ERR}`', 0, 24, h=9)
 lg.y += 9
