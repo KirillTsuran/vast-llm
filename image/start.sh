@@ -14,8 +14,8 @@ PY
 echo loading > $S
 # TabbyAPI is restarted if it ever exits (CUDA error, out of memory, crash); the reason stays in tabby.log
 ( cd /app; while true; do
-    LLM_LOG_DIR=$L/dialogs python serve.py >> $L/tabby.log 2>&1
-    echo "$(date '+%F %T') TabbyAPI exited with code $?, restart in 10s" >> $L/tabby.log; echo restarting > $S; sleep 10
+    LLM_LOG_DIR=$L/dialogs python serve.py >> $L/tabby.log 2>&1; rc=$?
+    echo "$(date '+%F %T') TabbyAPI exited with code $rc, restart in 10s" >> $L/tabby.log; echo restarting > $S; sleep 10
   done ) > /dev/null 2>&1 &
 # state follows the API: ready whenever the model answers
 ( while sleep 5; do
