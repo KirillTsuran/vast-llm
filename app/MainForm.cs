@@ -51,7 +51,7 @@ public class MainForm : Form
         down.Click += async (_, _) => await core.Down("вручную");
         copy.Click += (_, _) => Clipboard.SetText(url.Text);
         folder.Click += (_, _) => Process.Start("explorer.exe", core.Dir);
-        grafana.Click += (_, _) => Process.Start(new ProcessStartInfo($"http://127.0.0.1:{core.Cfg.GrafanaPort}/d/llm") { UseShellExecute = true });
+        grafana.Click += (_, _) => Process.Start(new ProcessStartInfo($"http://127.0.0.1:{core.Cfg.GrafanaPort}/d/llm-metrics") { UseShellExecute = true });
         var show = new EventWaitHandle(false, EventResetMode.AutoReset, "VastLLM-show");
         new Thread(() => { while (show.WaitOne()) BeginInvokeSafe(() => { Show(); WindowState = FormWindowState.Normal; Activate(); }); }) { IsBackground = true }.Start();
         ui.Tick += (_, _) => Refresh2();

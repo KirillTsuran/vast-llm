@@ -22,13 +22,14 @@ class Dash:
                                                          'mappings': mappings or []}, 'overrides': []},
                             'options': {'reduceOptions': {'calcs': ['lastNotNull']}, 'colorMode': 'value', 'graphMode': 'none', 'textMode': 'value'}})
 
-    def ts(self, title, targets, x, w, unit='short', h=8, desc='', stack=False, ds=PROM, bars=False):
+    def ts(self, title, targets, x, w, unit='short', h=8, desc='', stack=False, ds=PROM, bars=False, interval=None):
         self.panels.append({'type': 'timeseries', 'title': title, 'description': desc, 'datasource': ds, 'gridPos': {'x': x, 'y': self.y, 'w': w, 'h': h},
                             'targets': [{'expr': e, 'legendFormat': l, 'refId': chr(65 + i), 'datasource': ds} for i, (e, l) in enumerate(targets)],
                             'fieldConfig': {'defaults': {'unit': unit, 'custom': {'lineWidth': 2, 'fillOpacity': 60 if bars else 10,
                                                                                   'drawStyle': 'bars' if bars else 'line',
                                                                                   'stacking': {'mode': 'normal' if stack else 'none'}}}, 'overrides': []},
-                            'options': {'legend': {'displayMode': 'list', 'placement': 'bottom'}, 'tooltip': {'mode': 'multi'}}})
+                            'options': {'legend': {'displayMode': 'list', 'placement': 'bottom'}, 'tooltip': {'mode': 'multi'}},
+                            **({'interval': interval} if interval else {})})
 
     def logs(self, title, expr, x, w, h=12, desc=''):
         self.panels.append({'type': 'logs', 'title': title, 'description': desc, 'datasource': LOKI, 'gridPos': {'x': x, 'y': self.y, 'w': w, 'h': h},
@@ -49,31 +50,36 @@ link = lambda uid, title: [{'title': title, 'type': 'link', 'url': f'/d/{uid}', 
 # ---------------- metrics ----------------
 m = Dash()
 m.row('Сейчас')
-m.stat('Ток/с', 'sum(increase(llm_generated_tokens_total[15m])) / clamp_min(sum(increase(llm_decode_seconds_total[15m])), 0.001)', 0, 4, color='green',
-       desc='Скорость генерации модели: среднее за последние 15 минут (только время генерации)')
-m.stat('Запросов/час', 'sum(increase(llm_requests_completed_total[1h]))', 4, 4)
-m.stat('В работе', 'sum(llm_requests_processing) or vector(0)', 8, 4, color='purple')
-m.stat('Зацикливания 24ч', 'sum(increase(llm_requests_finished_total{reason="loop_detected"}[24h])) or vector(0)', 12, 4, color='red',
-       desc='generation_loop_detected: запрос оборван детектором повторов')
-m.stat('LoopBreak 24ч', 'sum(increase(llm_loopbreak_events_total[24h])) or vector(0)', 16, 4, color='orange',
-       desc='Сколько раз защита остановила вырожденный повтор в рассуждении (запрос при этом продолжается)')
-m.stat('GPU', 'llm_gpu_util_percent', 20, 4, unit='percent', color='yellow')
+m.stat('Скорость, ток/с', 'sum(increase(llm_generated_tokens_total[15m])) / clamp_min(sum(increase(llm_decode_seconds_total[15m])), 0.001)', 0, 4, color='green',
+       desc='Сколько токенов в секунду пишет модель (среднее за 15 минут, только пока она пишет)')
+m.stat('Ответов за час', 'sum(increase(llm_requests_completed_total[1h]))', 4, 4)
+m.stat('Пишет сейчас', 'sum(llm_requests_processing) or vector(0)', 8, 4, color='purple', desc='Сколько запросов модель обрабатывает прямо сейчас (0 или 1)')
+m.stat('Зацикливаний за сутки', 'sum(increase(llm_requests_finished_total{reason="loop_detected"}[24h])) or vector(0)', 12, 4, color='red',
+       desc='Ответы, оборванные с ошибкой generation_loop_detected. Норма — 0')
+m.stat('LoopBreak спас, раз', 'sum(increase(llm_loopbreak_events_total[24h])) or vector(0)', 16, 4, color='orange',
+       desc='За сутки: сколько раз защита прервала повтор в рассуждении, и ответ продолжился нормально')
+m.stat('Загрузка GPU', 'llm_gpu_util_percent', 20, 4, unit='percent', color='yellow')
 m.y += 4
-m.row('Генерация')
-m.ts('Токены в секунду', [('sum(rate(llm_generated_tokens_total[1m]))', 'генерация'), ('sum(rate(llm_prompt_tokens_total[1m]))', 'обработка входа (новые токены)')], 0, 12)
-m.ts('Как заканчиваются запросы', [('sum by (reason) (increase(llm_requests_finished_total[5m]))', '{{reason}}')], 12, 12, stack=True, bars=True,
-     desc='stop_token — нормальный конец; max_new_tokens — упёрся в лимит; loop_detected — оборван из-за повтора')
+m.row('Модель')
+m.ts('Скорость, токенов в секунду', [('sum(rate(llm_generated_tokens_total[1m]))', 'пишет ответ'), ('sum(rate(llm_prompt_tokens_total[1m]))', 'читает запрос')], 0, 12,
+     desc='«Читает запрос» — обработка нового текста запроса (всплески при длинных вопросах), «пишет ответ» — генерация')
+REASONS = [('stop_token', 'нормально завершён'), ('max_new_tokens', 'упёрся в лимит длины'), ('loop_detected', 'оборван: зацикливание')]
+m.ts('Ответы по итогу, штук за минуту',
+     [(f'sum(increase(llm_requests_finished_total{{reason="{r}"}}[1m])) or vector(0)', name) for r, name in REASONS] +
+     [('sum(increase(llm_requests_finished_total{reason!~"stop_token|max_new_tokens|loop_detected"}[1m])) or vector(0)', 'прочее')],
+     12, 12, stack=True, bars=True, interval='1m', desc='Каждый столбик — сколько ответов закончилось за минуту и как')
 m.y += 8
-m.ts('Контекст в кэше, токенов', [('llm_cache_used_tokens', 'занято'), ('llm_context_tokens', 'максимум')], 0, 12)
-m.ts('Принятие черновых токенов DFlash2, %', [('100 * sum(rate(llm_draft_accepted_tokens_total[2m])) / clamp_min(sum(rate(llm_draft_accepted_tokens_total[2m])) + sum(rate(llm_draft_rejected_tokens_total[2m])), 0.001)', 'принято')],
-     12, 12, unit='percent', desc='Чем выше, тем сильнее ускорение от DFlash2')
+m.ts('Память контекста, токенов', [('llm_cache_used_tokens', 'занято сейчас'), ('llm_context_tokens', 'максимум (112K)')], 0, 12,
+     desc='Сколько токенов диалога сейчас держит модель. Когда «занято» подходит к максимуму, длинный диалог надо сжимать')
+m.ts('Ускорение DFlash2: угадано токенов, %', [('100 * sum(rate(llm_draft_accepted_tokens_total[2m])) / clamp_min(sum(rate(llm_draft_accepted_tokens_total[2m])) + sum(rate(llm_draft_rejected_tokens_total[2m])), 0.001)', 'угадано')],
+     12, 12, unit='percent', desc='Доля токенов, которые маленькая модель-помощник угадала заранее. Чем выше, тем быстрее генерация')
 m.y += 8
 m.row('Видеокарта')
 m.ts('Видеопамять, МиБ', [('llm_gpu_mem_used_mib', 'занято'), ('llm_gpu_mem_total_mib', 'всего')], 0, 8, unit='decmbytes')
 m.ts('Загрузка GPU, %', [('llm_gpu_util_percent', 'загрузка')], 8, 8, unit='percent')
 m.ts('Мощность (Вт) и температура (°C)', [('llm_gpu_power_watts', 'Вт'), ('llm_gpu_temp_celsius', '°C')], 16, 8)
 m.y += 8
-m.row('Машина (node_exporter)')
+m.row('Сервер: процессор, память, диск, сеть')
 m.ts('CPU, %', [('100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[1m])))', 'занято')], 0, 6, unit='percent')
 m.ts('Оперативная память', [('node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes', 'занято'), ('node_memory_MemTotal_bytes', 'всего')], 6, 6, unit='bytes')
 m.ts('Диск /, занято', [('node_filesystem_size_bytes{mountpoint="/"} - node_filesystem_avail_bytes{mountpoint="/"}', 'занято'),
@@ -81,7 +87,7 @@ m.ts('Диск /, занято', [('node_filesystem_size_bytes{mountpoint="/"} -
 m.ts('Сеть', [('sum(rate(node_network_receive_bytes_total{device!="lo"}[1m]))', 'приём'), ('sum(rate(node_network_transmit_bytes_total{device!="lo"}[1m]))', 'отдача')],
      18, 6, unit='Bps')
 m.y += 8
-m.row('Сервисы')
+m.row('Сервисы мониторинга и модели')
 SERVICES = [('tabby', 'TabbyAPI (модель)'), ('gpu', 'Экспортёр GPU'), ('node', 'node_exporter'), ('prometheus', 'Prometheus'),
             ('loki', 'Loki'), ('alloy', 'Alloy'), ('grafana', 'Grafana')]
 for i, (job, title) in enumerate(SERVICES):
@@ -94,23 +100,28 @@ lg = Dash()
 VARS = [{'type': 'query', 'name': 'service', 'label': 'Сервис', 'datasource': LOKI, 'query': {'label': 'service', 'type': 1, 'stream': '', 'refId': 'svc'},
          'definition': 'label_values(service)', 'includeAll': True, 'multi': True, 'current': {'text': 'All', 'value': '$__all'}, 'refresh': 2},
         {'type': 'textbox', 'name': 'search', 'label': 'Найти текст', 'query': '', 'current': {'text': '', 'value': ''}}]
-SEL = '{service=~"$service"}'
-ERR = '(?i)(error|exception|traceback|failed|oom|loop_detected)'
+# full request/response texts stay in Loki (event=request_body/response_body) but are hidden from the overview panels
+SEL = '{service=~"$service", event!~"request_body|response_body"}'
+ERR = '(?i)(level=error|level=ERROR|"level": "error"|exception|traceback|out of memory|loop_detected)'
+ENDS = '{job="requests", event="generation_end"}'
 lg.row('Обзор')
-lg.stat('Строк за 15 мин', f'sum(count_over_time({SEL} [15m]))', 0, 6, ds=LOKI)
-lg.stat('Ошибок за час', f'sum(count_over_time({SEL} |~ "{ERR}" [1h])) or vector(0)', 6, 6, color='red', ds=LOKI,
-        desc='Строки со словами error, exception, traceback, failed, oom, loop_detected')
-lg.stat('Зацикливаний за сутки', 'sum(count_over_time({job="requests"} |= "loop_detected" [24h])) or vector(0)', 12, 6, color='orange', ds=LOKI)
-lg.stat('Запросов/час', 'sum(count_over_time({job="requests", event="generation_end"} [1h])) or vector(0)', 18, 6, ds=LOKI)
+lg.stat('Ответов за час', f'sum(count_over_time({ENDS} [1h])) or vector(0)', 0, 6, ds=LOKI)
+lg.stat('Ошибок в логах за час', f'sum(count_over_time({SEL} |~ `{ERR}` [1h])) or vector(0)', 6, 6, color='red', ds=LOKI,
+        desc='Строки уровня error, exception, traceback, out of memory, loop_detected во всех сервисах')
+lg.stat('Зацикливаний за сутки', f'sum(count_over_time({ENDS} |= "loop_detected" [24h])) or vector(0)', 12, 6, color='orange', ds=LOKI)
+lg.stat('Строк логов за 15 мин', f'sum(count_over_time({SEL} [15m]))', 18, 6, ds=LOKI)
 lg.y += 4
-lg.ts('Объём логов по сервисам', [(f'sum by (service) (count_over_time({SEL} [1m]))', '{{service}}')], 0, 12, ds=LOKI, stack=True, bars=True)
-lg.ts('Ошибки по сервисам', [(f'sum by (service) (count_over_time({SEL} |~ "{ERR}" [5m]))', '{{service}}')], 12, 12, ds=LOKI, stack=True, bars=True)
+lg.logs('Ответы модели (одна строка на ответ)',
+        f'{ENDS} | json | line_format `итог: {{{{.metrics_eos_reason}}}} · вход {{{{.metrics_prompt_tokens}}}} ток (из кэша {{{{.metrics_cached_tokens}}}}) · '
+        f'ответ {{{{.metrics_gen_tokens}}}} ток · {{{{.metrics_gen_tokens_per_sec}}}} ток/с · всего {{{{.metrics_total_time}}}} с · контекст {{{{.context_len}}}}`',
+        0, 24, h=9, desc='stop_token — ответ завершён нормально; max_new_tokens — упёрся в лимит длины; loop_detected — оборван из-за зацикливания')
+lg.y += 9
+lg.ts('Объём логов по сервисам, строк в минуту', [(f'sum by (service) (count_over_time({SEL} [1m]))', '{{service}}')], 0, 12, ds=LOKI, stack=True, bars=True)
+lg.ts('Ошибки по сервисам, за 5 минут', [(f'sum by (service) (count_over_time({SEL} |~ `{ERR}` [5m]))', '{{service}}')], 12, 12, ds=LOKI, stack=True, bars=True)
 lg.y += 8
 lg.row('Логи')
-lg.logs('Все логи (фильтр: Сервис и Найти текст вверху)', f'{SEL} |~ "(?i)$search"', 0, 24, h=14)
-lg.y += 14
-lg.logs('Только ошибки', f'{SEL} |~ "{ERR}"', 0, 12, h=10)
-lg.logs('Журнал запросов TabbyAPI', '{job="requests"} | json | line_format "{{.event}} {{.level}} {{.request_id}} {{.metrics}}"', 12, 12, h=10,
-        desc='События запросов: начало, конец, причина завершения и метрики')
+lg.logs('Только ошибки', f'{SEL} |~ `{ERR}`', 0, 24, h=9)
+lg.y += 9
+lg.logs('Все логи (вверху: выбрать Сервис и Найти текст)', f'{SEL} |~ "(?i)$search"', 0, 24, h=14)
 lg.y += 10
 lg.save('llm-logs', 'LLM — логи', 'llm-logs.json', templating=VARS, links=link('llm-metrics', 'LLM — метрики'))

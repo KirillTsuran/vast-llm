@@ -25,7 +25,7 @@
   },
   {
    "type": "stat",
-   "title": "Строк за 15 мин",
+   "title": "Ответов за час",
    "description": "",
    "datasource": {
     "type": "loki",
@@ -39,7 +39,7 @@
    },
    "targets": [
     {
-     "expr": "sum(count_over_time({service=~\"$service\"} [15m]))",
+     "expr": "sum(count_over_time({job=\"requests\", event=\"generation_end\"} [1h])) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -73,8 +73,8 @@
   },
   {
    "type": "stat",
-   "title": "Ошибок за час",
-   "description": "Строки со словами error, exception, traceback, failed, oom, loop_detected",
+   "title": "Ошибок в логах за час",
+   "description": "Строки уровня error, exception, traceback, out of memory, loop_detected во всех сервисах",
    "datasource": {
     "type": "loki",
     "uid": "loki"
@@ -87,7 +87,7 @@
    },
    "targets": [
     {
-     "expr": "sum(count_over_time({service=~\"$service\"} |~ \"(?i)(error|exception|traceback|failed|oom|loop_detected)\" [1h])) or vector(0)",
+     "expr": "sum(count_over_time({service=~\"$service\", event!~\"request_body|response_body\"} |~ `(?i)(level=error|level=ERROR|\"level\": \"error\"|exception|traceback|out of memory|loop_detected)` [1h])) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -135,7 +135,7 @@
    },
    "targets": [
     {
-     "expr": "sum(count_over_time({job=\"requests\"} |= \"loop_detected\" [24h])) or vector(0)",
+     "expr": "sum(count_over_time({job=\"requests\", event=\"generation_end\"} |= \"loop_detected\" [24h])) or vector(0)",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -169,7 +169,7 @@
   },
   {
    "type": "stat",
-   "title": "Запросов/час",
+   "title": "Строк логов за 15 мин",
    "description": "",
    "datasource": {
     "type": "loki",
@@ -183,7 +183,7 @@
    },
    "targets": [
     {
-     "expr": "sum(count_over_time({job=\"requests\", event=\"generation_end\"} [1h])) or vector(0)",
+     "expr": "sum(count_over_time({service=~\"$service\", event!~\"request_body|response_body\"} [15m]))",
      "refId": "A",
      "instant": true,
      "datasource": {
@@ -216,9 +216,9 @@
    }
   },
   {
-   "type": "timeseries",
-   "title": "Объём логов по сервисам",
-   "description": "",
+   "type": "logs",
+   "title": "Ответы модели (одна строка на ответ)",
+   "description": "stop_token — ответ завершён нормально; max_new_tokens — упёрся в лимит длины; loop_detected — оборван из-за зацикливания",
    "datasource": {
     "type": "loki",
     "uid": "loki"
@@ -226,12 +226,44 @@
    "gridPos": {
     "x": 0,
     "y": 5,
+    "w": 24,
+    "h": 9
+   },
+   "targets": [
+    {
+     "expr": "{job=\"requests\", event=\"generation_end\"} | json | line_format `итог: {{.metrics_eos_reason}} · вход {{.metrics_prompt_tokens}} ток (из кэша {{.metrics_cached_tokens}}) · ответ {{.metrics_gen_tokens}} ток · {{.metrics_gen_tokens_per_sec}} ток/с · всего {{.metrics_total_time}} с · контекст {{.context_len}}`",
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     }
+    }
+   ],
+   "options": {
+    "showTime": true,
+    "wrapLogMessage": true,
+    "sortOrder": "Descending",
+    "enableLogDetails": true,
+    "dedupStrategy": "none"
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Объём логов по сервисам, строк в минуту",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 14,
     "w": 12,
     "h": 8
    },
    "targets": [
     {
-     "expr": "sum by (service) (count_over_time({service=~\"$service\"} [1m]))",
+     "expr": "sum by (service) (count_over_time({service=~\"$service\", event!~\"request_body|response_body\"} [1m]))",
      "legendFormat": "{{service}}",
      "refId": "A",
      "datasource": {
@@ -266,7 +298,7 @@
   },
   {
    "type": "timeseries",
-   "title": "Ошибки по сервисам",
+   "title": "Ошибки по сервисам, за 5 минут",
    "description": "",
    "datasource": {
     "type": "loki",
@@ -274,13 +306,13 @@
    },
    "gridPos": {
     "x": 12,
-    "y": 5,
+    "y": 14,
     "w": 12,
     "h": 8
    },
    "targets": [
     {
-     "expr": "sum by (service) (count_over_time({service=~\"$service\"} |~ \"(?i)(error|exception|traceback|failed|oom|loop_detected)\" [5m]))",
+     "expr": "sum by (service) (count_over_time({service=~\"$service\", event!~\"request_body|response_body\"} |~ `(?i)(level=error|level=ERROR|\"level\": \"error\"|exception|traceback|out of memory|loop_detected)` [5m]))",
      "legendFormat": "{{service}}",
      "refId": "A",
      "datasource": {
@@ -319,43 +351,11 @@
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 13,
+    "y": 22,
     "w": 24,
     "h": 1
    },
    "panels": []
-  },
-  {
-   "type": "logs",
-   "title": "Все логи (фильтр: Сервис и Найти текст вверху)",
-   "description": "",
-   "datasource": {
-    "type": "loki",
-    "uid": "loki"
-   },
-   "gridPos": {
-    "x": 0,
-    "y": 14,
-    "w": 24,
-    "h": 14
-   },
-   "targets": [
-    {
-     "expr": "{service=~\"$service\"} |~ \"(?i)$search\"",
-     "refId": "A",
-     "datasource": {
-      "type": "loki",
-      "uid": "loki"
-     }
-    }
-   ],
-   "options": {
-    "showTime": true,
-    "wrapLogMessage": true,
-    "sortOrder": "Descending",
-    "enableLogDetails": true,
-    "dedupStrategy": "none"
-   }
   },
   {
    "type": "logs",
@@ -367,13 +367,13 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 28,
-    "w": 12,
-    "h": 10
+    "y": 23,
+    "w": 24,
+    "h": 9
    },
    "targets": [
     {
-     "expr": "{service=~\"$service\"} |~ \"(?i)(error|exception|traceback|failed|oom|loop_detected)\"",
+     "expr": "{service=~\"$service\", event!~\"request_body|response_body\"} |~ `(?i)(level=error|level=ERROR|\"level\": \"error\"|exception|traceback|out of memory|loop_detected)`",
      "refId": "A",
      "datasource": {
       "type": "loki",
@@ -391,21 +391,21 @@
   },
   {
    "type": "logs",
-   "title": "Журнал запросов TabbyAPI",
-   "description": "События запросов: начало, конец, причина завершения и метрики",
+   "title": "Все логи (вверху: выбрать Сервис и Найти текст)",
+   "description": "",
    "datasource": {
     "type": "loki",
     "uid": "loki"
    },
    "gridPos": {
-    "x": 12,
-    "y": 28,
-    "w": 12,
-    "h": 10
+    "x": 0,
+    "y": 32,
+    "w": 24,
+    "h": 14
    },
    "targets": [
     {
-     "expr": "{job=\"requests\"} | json | line_format \"{{.event}} {{.level}} {{.request_id}} {{.metrics}}\"",
+     "expr": "{service=~\"$service\", event!~\"request_body|response_body\"} |~ \"(?i)$search\"",
      "refId": "A",
      "datasource": {
       "type": "loki",

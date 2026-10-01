@@ -25,8 +25,8 @@
   },
   {
    "type": "stat",
-   "title": "Ток/с",
-   "description": "Скорость генерации модели: среднее за последние 15 минут (только время генерации)",
+   "title": "Скорость, ток/с",
+   "description": "Сколько токенов в секунду пишет модель (среднее за 15 минут, только пока она пишет)",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -73,7 +73,7 @@
   },
   {
    "type": "stat",
-   "title": "Запросов/час",
+   "title": "Ответов за час",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -121,8 +121,8 @@
   },
   {
    "type": "stat",
-   "title": "В работе",
-   "description": "",
+   "title": "Пишет сейчас",
+   "description": "Сколько запросов модель обрабатывает прямо сейчас (0 или 1)",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -169,8 +169,8 @@
   },
   {
    "type": "stat",
-   "title": "Зацикливания 24ч",
-   "description": "generation_loop_detected: запрос оборван детектором повторов",
+   "title": "Зацикливаний за сутки",
+   "description": "Ответы, оборванные с ошибкой generation_loop_detected. Норма — 0",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -217,8 +217,8 @@
   },
   {
    "type": "stat",
-   "title": "LoopBreak 24ч",
-   "description": "Сколько раз защита остановила вырожденный повтор в рассуждении (запрос при этом продолжается)",
+   "title": "LoopBreak спас, раз",
+   "description": "За сутки: сколько раз защита прервала повтор в рассуждении, и ответ продолжился нормально",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -265,7 +265,7 @@
   },
   {
    "type": "stat",
-   "title": "GPU",
+   "title": "Загрузка GPU",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -313,7 +313,7 @@
   },
   {
    "type": "row",
-   "title": "Генерация",
+   "title": "Модель",
    "collapsed": false,
    "gridPos": {
     "x": 0,
@@ -325,8 +325,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Токены в секунду",
-   "description": "",
+   "title": "Скорость, токенов в секунду",
+   "description": "«Читает запрос» — обработка нового текста запроса (всплески при длинных вопросах), «пишет ответ» — генерация",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -340,7 +340,7 @@
    "targets": [
     {
      "expr": "sum(rate(llm_generated_tokens_total[1m]))",
-     "legendFormat": "генерация",
+     "legendFormat": "пишет ответ",
      "refId": "A",
      "datasource": {
       "type": "prometheus",
@@ -349,7 +349,7 @@
     },
     {
      "expr": "sum(rate(llm_prompt_tokens_total[1m]))",
-     "legendFormat": "обработка входа (новые токены)",
+     "legendFormat": "читает запрос",
      "refId": "B",
      "datasource": {
       "type": "prometheus",
@@ -383,8 +383,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Как заканчиваются запросы",
-   "description": "stop_token — нормальный конец; max_new_tokens — упёрся в лимит; loop_detected — оборван из-за повтора",
+   "title": "Ответы по итогу, штук за минуту",
+   "description": "Каждый столбик — сколько ответов закончилось за минуту и как",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -397,9 +397,36 @@
    },
    "targets": [
     {
-     "expr": "sum by (reason) (increase(llm_requests_finished_total[5m]))",
-     "legendFormat": "{{reason}}",
+     "expr": "sum(increase(llm_requests_finished_total{reason=\"stop_token\"}[1m])) or vector(0)",
+     "legendFormat": "нормально завершён",
      "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "sum(increase(llm_requests_finished_total{reason=\"max_new_tokens\"}[1m])) or vector(0)",
+     "legendFormat": "упёрся в лимит длины",
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "sum(increase(llm_requests_finished_total{reason=\"loop_detected\"}[1m])) or vector(0)",
+     "legendFormat": "оборван: зацикливание",
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prom"
+     }
+    },
+    {
+     "expr": "sum(increase(llm_requests_finished_total{reason!~\"stop_token|max_new_tokens|loop_detected\"}[1m])) or vector(0)",
+     "legendFormat": "прочее",
+     "refId": "D",
      "datasource": {
       "type": "prometheus",
       "uid": "prom"
@@ -428,12 +455,13 @@
     "tooltip": {
      "mode": "multi"
     }
-   }
+   },
+   "interval": "1m"
   },
   {
    "type": "timeseries",
-   "title": "Контекст в кэше, токенов",
-   "description": "",
+   "title": "Память контекста, токенов",
+   "description": "Сколько токенов диалога сейчас держит модель. Когда «занято» подходит к максимуму, длинный диалог надо сжимать",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -447,7 +475,7 @@
    "targets": [
     {
      "expr": "llm_cache_used_tokens",
-     "legendFormat": "занято",
+     "legendFormat": "занято сейчас",
      "refId": "A",
      "datasource": {
       "type": "prometheus",
@@ -456,7 +484,7 @@
     },
     {
      "expr": "llm_context_tokens",
-     "legendFormat": "максимум",
+     "legendFormat": "максимум (112K)",
      "refId": "B",
      "datasource": {
       "type": "prometheus",
@@ -490,8 +518,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Принятие черновых токенов DFlash2, %",
-   "description": "Чем выше, тем сильнее ускорение от DFlash2",
+   "title": "Ускорение DFlash2: угадано токенов, %",
+   "description": "Доля токенов, которые маленькая модель-помощник угадала заранее. Чем выше, тем быстрее генерация",
    "datasource": {
     "type": "prometheus",
     "uid": "prom"
@@ -505,7 +533,7 @@
    "targets": [
     {
      "expr": "100 * sum(rate(llm_draft_accepted_tokens_total[2m])) / clamp_min(sum(rate(llm_draft_accepted_tokens_total[2m])) + sum(rate(llm_draft_rejected_tokens_total[2m])), 0.001)",
-     "legendFormat": "принято",
+     "legendFormat": "угадано",
      "refId": "A",
      "datasource": {
       "type": "prometheus",
@@ -716,7 +744,7 @@
   },
   {
    "type": "row",
-   "title": "Машина (node_exporter)",
+   "title": "Сервер: процессор, память, диск, сеть",
    "collapsed": false,
    "gridPos": {
     "x": 0,
@@ -951,7 +979,7 @@
   },
   {
    "type": "row",
-   "title": "Сервисы",
+   "title": "Сервисы мониторинга и модели",
    "collapsed": false,
    "gridPos": {
     "x": 0,
