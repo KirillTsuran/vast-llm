@@ -12,6 +12,11 @@ loki.source.file "llm" {
 }
 
 loki.process "llm" {
+  // benign noise: Loki/Grafana log every query cancelled by a dashboard refresh as an error
+  stage.drop {
+    expression          = "context canceled|error notifying scheduler about finished query|Partial data response error|Plugin Request Completed"
+    drop_counter_reason = "query_cancel_noise"
+  }
   // service name from the file name: /var/log/llm/tabby.log -> tabby
   stage.regex {
     expression = "/var/log/llm/(?:dialogs/)?(?P<service>[a-z_]+)"
