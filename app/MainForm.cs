@@ -8,7 +8,11 @@ static class Program
     static void Main()
     {
         using var mutex = new Mutex(true, "VastLLM-single-instance", out bool first);
-        if (!first) { MessageBox.Show("VastLLM уже запущен — окно в трее (значок у часов).", "VastLLM"); return; }
+        if (!first) // already running: ask the first copy to show its window
+        {
+            try { EventWaitHandle.OpenExisting("VastLLM-show").Set(); } catch { }
+            return;
+        }
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
     }
@@ -23,6 +27,7 @@ public class MainForm : Form
     readonly TextBox url = new() { ReadOnly = true, Width = 260 };
     readonly Button up = new() { Text = "Up", Width = 110, Height = 34 }, down = new() { Text = "Down", Width = 110, Height = 34 };
     readonly Button copy = new() { Text = "Копировать", AutoSize = true }, folder = new() { Text = "Папка и config.json", AutoSize = true };
+    readonly Button grafana = new() { Text = "Grafana", Width = 110, Height = 34 };
     readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Consolas", 9) };
     readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "VastLLM", Visible = true };
     readonly System.Windows.Forms.Timer ui = new() { Interval = 1000 }, tick = new() { Interval = 30000 };
@@ -36,7 +41,7 @@ public class MainForm : Form
         var urlRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         urlRow.Controls.AddRange(new Control[] { new Label { Text = "ZCode URL:", AutoSize = true, Padding = new Padding(0, 6, 0, 0) }, url, copy });
         var btnRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-        btnRow.Controls.AddRange(new Control[] { up, down, folder });
+        btnRow.Controls.AddRange(new Control[] { up, down, grafana, folder });
         top.Controls.AddRange(new Control[] { phase, msg, info, urlRow, btnRow });
         Controls.Add(log); Controls.Add(top);
 
@@ -46,6 +51,9 @@ public class MainForm : Form
         down.Click += async (_, _) => await core.Down("вручную");
         copy.Click += (_, _) => Clipboard.SetText(url.Text);
         folder.Click += (_, _) => Process.Start("explorer.exe", core.Dir);
+        grafana.Click += (_, _) => Process.Start(new ProcessStartInfo($"http://127.0.0.1:{core.Cfg.GrafanaPort}/d/llm") { UseShellExecute = true });
+        var show = new EventWaitHandle(false, EventResetMode.AutoReset, "VastLLM-show");
+        new Thread(() => { while (show.WaitOne()) BeginInvokeSafe(() => { Show(); WindowState = FormWindowState.Normal; Activate(); }); }) { IsBackground = true }.Start();
         ui.Tick += (_, _) => Refresh2();
         tick.Tick += async (_, _) => await core.Tick();
         tray.DoubleClick += (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); };
@@ -89,6 +97,7 @@ public class MainForm : Form
         bool busy = core.Phase is "renting" or "booting" or "downloading" or "loading" or "stopping";
         up.Enabled = !busy && core.Phase != "ready";
         down.Enabled = all.Count > 0 && core.Phase != "stopping";
+        grafana.Enabled = core.Tunnel;
         tray.Text = "VastLLM: " + phase.Text;
     }
 

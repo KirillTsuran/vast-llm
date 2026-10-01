@@ -1,0 +1,40 @@
+// Ships every service log and the TabbyAPI request journal to Loki (all local to the GPU machine).
+local.file_match "llm" {
+  path_targets = [
+    {"__path__" = "/var/log/llm/*.log", "job" = "services"},
+    {"__path__" = "/var/log/llm/dialogs/*.jsonl", "job" = "requests"},
+  ]
+}
+
+loki.source.file "llm" {
+  targets    = local.file_match.llm.targets
+  forward_to = [loki.process.llm.receiver]
+}
+
+loki.process "llm" {
+  // service name from the file name: /var/log/llm/tabby.log -> tabby
+  stage.regex {
+    expression = "/var/log/llm/(?:dialogs/)?(?P<service>[a-z_]+)"
+    source     = "filename"
+  }
+  stage.labels {
+    values = {service = ""}
+  }
+  // request journal lines are JSON: expose the event type and level as labels
+  stage.match {
+    selector = "{job=\"requests\"}"
+    stage.json {
+      expressions = {event = "event", level = "level"}
+    }
+    stage.labels {
+      values = {event = "", level = ""}
+    }
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://127.0.0.1:3100/loki/api/v1/push"
+  }
+}

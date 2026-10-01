@@ -20,10 +20,13 @@ RUN SP=$(python -c 'import exllamav3,os;print(os.path.dirname(exllamav3.__file__
     && cp /tmp/overlay/errors.py common/errors.py && cp /tmp/overlay/auth.py common/auth.py \
     && cp /tmp/overlay/observability.py /tmp/overlay/serve.py /app/ \
     && python /tmp/lb/patch_tabby.py /app && rm -rf /tmp/overlay /tmp/lb
-# Monitoring: Prometheus + Grafana (127.0.0.1 only, reached through the app's SSH tunnel) and a tiny nvidia-smi exporter
+# Monitoring stack (latest releases), all on 127.0.0.1; Grafana is reached through the app's SSH tunnel
 ARG PROM=3.15.0
+ARG NODE=1.12.1
+ARG LOKI=3.7.8
+ARG ALLOY=1.20.1
 ARG GRAF=13.2.3
-RUN curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM}/prometheus-${PROM}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/prometheus-${PROM}.linux-amd64 /opt/prometheus     && curl -fsSL "https://dl.grafana.com/oss/release/grafana-${GRAF}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/grafana-* /opt/grafana
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*     && curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM}/prometheus-${PROM}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/prometheus-${PROM}.linux-amd64 /opt/prometheus     && curl -fsSL "https://github.com/prometheus/node_exporter/releases/download/v${NODE}/node_exporter-${NODE}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/node_exporter-${NODE}.linux-amd64 /opt/node_exporter     && mkdir -p /opt/loki /opt/alloy     && curl -fsSL -o /tmp/loki.zip "https://github.com/grafana/loki/releases/download/v${LOKI}/loki-linux-amd64.zip" && unzip -q /tmp/loki.zip -d /opt/loki && mv /opt/loki/loki-linux-amd64 /opt/loki/loki     && curl -fsSL -o /tmp/alloy.zip "https://github.com/grafana/alloy/releases/download/v${ALLOY}/alloy-linux-amd64.zip" && unzip -q /tmp/alloy.zip -d /opt/alloy && mv /opt/alloy/alloy-linux-amd64 /opt/alloy/alloy     && chmod +x /opt/loki/loki /opt/alloy/alloy && rm /tmp/*.zip     && curl -fsSL "https://dl.grafana.com/oss/release/grafana-${GRAF}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/grafana-* /opt/grafana
 COPY monitoring/ /opt/monitoring/
 COPY tabby-config.yml /app/config.yml
 COPY start.sh entry.sh download.py /opt/llm/

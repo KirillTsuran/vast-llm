@@ -6,3 +6,8 @@ datasources:
     url: http://127.0.0.1:9090
     isDefault: true
     jsonData: {timeInterval: 5s}
+  - name: Loki
+    uid: loki
+    type: loki
+    url: http://127.0.0.1:3100
+    jsonData: {maxLines: 2000}

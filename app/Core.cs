@@ -19,6 +19,7 @@ public class Config
     [JsonPropertyName("datacenter_only")] public bool Datacenter { get; set; } = false;
     [JsonPropertyName("race_two_hosts")] public bool Race { get; set; } = true;
     [JsonPropertyName("local_port")] public int LocalPort { get; set; } = 8080;
+    [JsonPropertyName("grafana_port")] public int GrafanaPort { get; set; } = 3000;
     [JsonPropertyName("image")] public string Image { get; set; } = "ghcr.io/kirilltsuran/vast-llm:latest";
     [JsonPropertyName("model")] public string Model { get; set; } = "qwen3.8-27b-uncensored";
     [JsonPropertyName("usd_rub")] public double UsdRub { get; set; } = 83.56;
@@ -64,7 +65,7 @@ public class Core
     public event Action<string> Logged;
 
     SshClient client;
-    ForwardedPortLocal fwd;
+    ForwardedPortLocal fwd, fwdGrafana;
     PrivateKeyFile key;
     string pub;
     readonly SemaphoreSlim busy = new(1, 1);
@@ -223,7 +224,19 @@ public class Core
         var r = await Api(HttpMethod.Put, $"/asks/{o.Id}/", body);
         var id = (long?)r?["new_contract"] ?? 0;
         if (r?["success"]?.GetValue<bool>() != true || id == 0) throw new Exception("offer not accepted");
+        try { await Api(HttpMethod.Post, $"/instances/{id}/ssh", new { ssh_key = pub }); } catch (Exception e) { Log($"привязка ключа к {id}: {e.Message}"); }
         return id;
+    }
+
+    // Vast writes the account's SSH keys into every container, so the program's key must be among them
+    async Task EnsureAccountKey()
+    {
+        var body = pub.Split(' ')[1];
+        var keys = await Api(HttpMethod.Get, "/ssh/");
+        foreach (var k in keys?.AsArray() ?? new JsonArray())
+            if (((string)k?["public_key"] ?? "").Contains(body)) return;
+        await Api(HttpMethod.Post, "/ssh/", new { ssh_key = pub });
+        Log("SSH-ключ программы добавлен в аккаунт Vast");
     }
 
     // waits for the container and opens SSH to its own sshd (port 22 mapped to a random external port)
@@ -270,14 +283,22 @@ public class Core
         fwd.RequestReceived += (_, _) => lastUse = DateTime.UtcNow;
         client.AddForwardedPort(fwd);
         fwd.Start();
+        try
+        {
+            fwdGrafana = new ForwardedPortLocal("127.0.0.1", (uint)Cfg.GrafanaPort, "127.0.0.1", 3000);
+            client.AddForwardedPort(fwdGrafana);
+            fwdGrafana.Start();
+        }
+        catch (Exception e) { Log($"Grafana: порт {Cfg.GrafanaPort} занят ({e.Message})"); }
         Exec("touch /opt/llm/heartbeat");
     }
 
     void CloseClient()
     {
         try { fwd?.Stop(); } catch { }
+        try { fwdGrafana?.Stop(); } catch { }
         try { client?.Dispose(); } catch { }
-        fwd = null; client = null;
+        fwd = null; fwdGrafana = null; client = null;
     }
 
     string Exec(string cmd)
@@ -295,6 +316,7 @@ public class Core
         var start = DateTime.UtcNow;
         try
         {
+            await EnsureAccountKey();
             if (St.Id != 0 && !Tunnel)
             {
                 Set("booting", $"подключаюсь к машине {St.Id}");
