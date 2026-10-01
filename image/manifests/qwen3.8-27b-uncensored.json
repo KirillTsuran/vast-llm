@@ -1,0 +1,86 @@
+{
+  "repo": "Honkware/Qwen3.8-27B-heretic-ara-exl3-4.0bpw",
+  "revision": "1d09f16a35dc3c23b9634741bf61e6c746fcce21",
+  "files": [
+    {
+      "name": "LICENSE",
+      "size": 11544,
+      "sha256": null
+    },
+    {
+      "name": "chat_template.jinja",
+      "size": 8952,
+      "sha256": null
+    },
+    {
+      "name": "config.json",
+      "size": 4047,
+      "sha256": null
+    },
+    {
+      "name": "crc32.txt",
+      "size": 238,
+      "sha256": null
+    },
+    {
+      "name": "generation_config.json",
+      "size": 214,
+      "sha256": null
+    },
+    {
+      "name": "merges.txt",
+      "size": 3353259,
+      "sha256": null
+    },
+    {
+      "name": "model-00001-of-00003.safetensors",
+      "size": 8471336006,
+      "sha256": "08693695c25fd85477fc0d9ea7c530718fc30a22ed36652151babd164af33beb"
+    },
+    {
+      "name": "model-00002-of-00003.safetensors",
+      "size": 8588950281,
+      "sha256": "da9de2fad32c4f06a3066aa96dcc84b469578009fef17ff00d03078ec6e485d4"
+    },
+    {
+      "name": "model-00003-of-00003.safetensors",
+      "size": 118373054,
+      "sha256": "af0433b965ab2f72ba1ed079d7f9725e172f42f68d185548d9925b28b46ca8db"
+    },
+    {
+      "name": "model.safetensors.index.json",
+      "size": 238664,
+      "sha256": null
+    },
+    {
+      "name": "preprocessor_config.json",
+      "size": 390,
+      "sha256": null
+    },
+    {
+      "name": "quantization_config.json",
+      "size": 629047,
+      "sha256": null
+    },
+    {
+      "name": "tokenizer.json",
+      "size": 19989492,
+      "sha256": "6f32ce20dc35f57a7f9ad1eac03525bd7d30f9df8cea6507e958279cc3657706"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "size": 1125,
+      "sha256": null
+    },
+    {
+      "name": "video_preprocessor_config.json",
+      "size": 385,
+      "sha256": null
+    },
+    {
+      "name": "vocab.json",
+      "size": 6722759,
+      "sha256": null
+    }
+  ]
+}

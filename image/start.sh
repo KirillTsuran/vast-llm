@@ -1,0 +1,24 @@
+#!/bin/bash
+# Vast onstart: download pinned weights, start TabbyAPI on 127.0.0.1:8080 (reachable only via the SSH tunnel),
+# and a watchdog that stops paying if the Windows app disappears (no heartbeat).
+L=/var/log/llm; S=/opt/llm/state; mkdir -p $L
+pgrep -f "python serve.py" >/dev/null && exit 0
+echo downloading > $S
+if ! python3 /opt/llm/download.py qwen3.8-27b-uncensored dflash > $L/download.log 2>&1; then echo download-failed > $S; exit 1; fi
+python3 - <<'PY'
+import json; p='/opt/llm/models/qwen3.8-27b-uncensored/tokenizer_config.json'
+d=json.load(open(p)); d['add_bos_token']=False; json.dump(d, open(p,'w'), indent=2)   # production BOS fix
+PY
+echo loading > $S
+cd /app && nohup env LLM_LOG_DIR=$L/dialogs python serve.py > $L/tabby.log 2>&1 &
+( for i in $(seq 240); do curl -sf http://127.0.0.1:8080/v1/model >/dev/null && { echo ready > $S; break; }; sleep 5; done ) &
+# watchdog: the app touches /opt/llm/heartbeat every minute; after WATCHDOG_MIN minutes without it, destroy self.
+touch /opt/llm/heartbeat
+( while sleep 60; do
+    age=$(( $(date +%s) - $(stat -c %Y /opt/llm/heartbeat) ))
+    if [ "$age" -gt $(( ${WATCHDOG_MIN:-60} * 60 )) ]; then
+      echo "$(date) no heartbeat ${age}s, self-destroy" >> $L/watchdog.log
+      curl -s -X DELETE -H "Authorization: Bearer ${CONTAINER_API_KEY:-}" "https://console.vast.ai/api/v0/instances/${CONTAINER_ID:-0}/" >> $L/watchdog.log 2>&1
+      sleep 600
+    fi
+  done ) > /dev/null 2>&1 &

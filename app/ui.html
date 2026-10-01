@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>vast-llm</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--fg:#1d1d1f;--mut:#6b6b6b;--line:#e2e2df;--ok:#1f8a4c;--warn:#b26b00;--err:#c0392b;--acc:#2f5bd3}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--card:#202020;--fg:#ececec;--mut:#9a9a9a;--line:#333;--acc:#6f93ff}}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,sans-serif}
+main{max-width:720px;margin:0 auto;padding:20px 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:12px}
+h1{font-size:18px;margin:0 0 12px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;background:var(--mut)}
+.ready .dot{background:var(--ok)}.error .dot{background:var(--err)}.busy .dot{background:var(--warn)}
+#phase{font-weight:600}#msg{color:var(--mut)}
+button{font:inherit;padding:9px 18px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}button:disabled{opacity:.45;cursor:default}
+code{background:var(--bg);padding:2px 6px;border-radius:5px}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:10px 0 0}dt{color:var(--mut)}dd{margin:0}
+input,select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+pre{margin:0;max-height:220px;overflow:auto;font-size:12px;color:var(--mut);white-space:pre-wrap}
+details summary{cursor:pointer;color:var(--mut)}
+</style></head><body><main>
+<div class="card" id="st"><h1>vast-llm</h1>
+ <div class="row"><span class="dot"></span><span id="phase">…</span><span id="msg"></span></div>
+ <dl id="info"></dl>
+ <div class="row" style="margin-top:14px"><button class="p" id="up">Up</button><button id="down">Down</button>
+ <span style="flex:1"></span><button id="quit">Выход</button></div>
+</div>
+<div class="card" id="keycard" hidden><b>Vast API key</b><div class="row" style="margin-top:8px">
+ <input id="key" type="password" placeholder="ключ из console.vast.ai → Keys" style="flex:1"><button class="p" id="savekey">Сохранить</button></div></div>
+<div class="card"><details><summary>Настройки</summary><div class="row" style="margin-top:10px">
+ <select id="gpu"><option>RTX 3090</option><option>RTX 4090</option><option>RTX 5090</option><option>RTX A6000</option></select>
+ <label>до $/ч <input id="dph" type="number" step="0.05" min="0.1" style="width:80px"></label>
+ <label>простой, мин <input id="idle" type="number" min="0" style="width:70px"></label>
+ <label><input id="dc" type="checkbox"> только дата-центры</label><button id="save">Сохранить</button></div></details></div>
+<div class="card"><pre id="log"></pre></div>
+</main><script>
+const $=id=>document.getElementById(id);let first=true;
+const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):'{}'}).then(refresh);
+const names={off:'Выключено',renting:'Аренда',booting:'Запуск',downloading:'Скачивание',loading:'Загрузка',ready:'Работает',stopping:'Удаление',error:'Ошибка'};
+async function refresh(){let s;try{s=await (await fetch('/api/status')).json()}catch(e){$('phase').textContent='утилита закрыта';return}
+ $('st').className='card '+(s.phase=='ready'?'ready':s.phase=='error'?'error':s.phase=='off'?'':'busy');
+ $('phase').textContent=names[s.phase]||s.phase;$('msg').textContent=s.msg||'';
+ const i=s.instance,rows=[['ZCode URL','<code>'+s.endpoint+'</code>'],['Модель','<code>'+s.model+'</code>']];
+ if(i)rows.push(['Машина',`#${i.id} · ${i.gpu} · ${i.geo}`],['Цена',`$${i.dph.toFixed(3)}/ч · работает ${i.uptime_min} мин · ≈ $${i.spent}`]);
+ if(s.idle_min!=null)rows.push(['Простой',`${s.idle_min} из ${s.cfg.idle_minutes} мин · активных запросов ${s.active_requests}`]);
+ $('info').innerHTML=rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('');
+ const busy=['renting','booting','downloading','loading','stopping'].includes(s.phase);
+ $('up').disabled=busy||s.phase=='ready'||!s.configured;$('down').disabled=!i||s.phase=='stopping';
+ $('keycard').hidden=s.configured;$('log').textContent=s.logs.join('\n');
+ if(first){first=false;$('gpu').value=s.cfg.gpu;$('dph').value=s.cfg.max_dph;$('idle').value=s.cfg.idle_minutes;$('dc').checked=s.cfg.datacenter_only}}
+$('up').onclick=()=>post('/api/up');$('down').onclick=()=>post('/api/down');
+$('savekey').onclick=()=>post('/api/config',{vast_api_key:$('key').value});
+$('save').onclick=()=>post('/api/config',{gpu:$('gpu').value,max_dph:+$('dph').value,idle_minutes:+$('idle').value,datacenter_only:$('dc').checked});
+$('quit').onclick=()=>{const run=!$('down').disabled;
+ if(run&&!window.__q){window.__q=1;$('quit').textContent='Машина работает и платится! Нажмите ещё раз, чтобы выйти';return}
+ post('/api/quit')};
+refresh();setInterval(refresh,2000);
+</script></body></html>
