@@ -15,7 +15,10 @@ public class Config
 {
     [JsonPropertyName("vast_api_key")] public string VastKey { get; set; } = "";
     [JsonPropertyName("gpu")] public string Gpu { get; set; } = "RTX 3090";
-    [JsonPropertyName("max_price_usd_per_hour")] public double MaxDph { get; set; } = 0.40;
+    // GPU models offered in the window; each has its own price limit ($/h), Up rents the chosen one
+    public static readonly Dictionary<string, double> DefaultPrices = new() { ["RTX 3090"] = 0.40, ["RTX 4090"] = 0.60, ["RTX 5090"] = 0.85 };
+    [JsonPropertyName("max_price_usd_per_hour_by_gpu")] public Dictionary<string, double> MaxPrices { get; set; } = new(DefaultPrices);
+    [JsonIgnore] public double MaxDph => MaxPrices.TryGetValue(Gpu, out var v) ? v : DefaultPrices.GetValueOrDefault(Gpu, 0.40);
     [JsonPropertyName("datacenter_only")] public bool Datacenter { get; set; } = false;
     [JsonPropertyName("race_two_hosts")] public bool Race { get; set; } = true;
     [JsonPropertyName("local_port")] public int LocalPort { get; set; } = 8080;
@@ -25,6 +28,10 @@ public class Config
     [JsonPropertyName("usd_rub")] public double UsdRub { get; set; } = 83.56;
     // start with Windows (minimized to the tray) and reconnect to the rented machine by itself
     [JsonPropertyName("autostart")] public bool Autostart { get; set; } = true;
+    // logs\vast-llm-<date>.log next to the exe; files older than this are deleted
+    [JsonPropertyName("log_retention_days")] public int LogDays { get; set; } = 30;
+    // extra "debug:" lines in the log file (API calls, SSH attempts, tunnel statistics); the window shows only the main events
+    [JsonPropertyName("debug_log")] public bool Debug { get; set; } = true;
 }
 
 public class State
@@ -72,7 +79,8 @@ public class Core
     string pub;
     readonly SemaphoreSlim busy = new(1, 1);
     CancellationTokenSource upCts;
-    DateTime lastUse = DateTime.UtcNow;
+    DateTime lastUse = DateTime.UtcNow, lastStats = DateTime.UtcNow;
+    int tunnelRequests;
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(40) };
     readonly object stateLock = new();
 
@@ -108,10 +116,32 @@ public class Core
         Append(s);
         Logged?.Invoke(DateTime.Now.ToString("HH:mm:ss ") + s);
     }
-    // the log file only; usable before the window exists and from crash handlers
+    public void Debug(string s) { if (Cfg.Debug) Append("debug: " + s); }
+
+    // the log file only; usable before the window exists and from crash handlers (one file per day)
+    public static readonly string LogDir = Path.Combine(AppContext.BaseDirectory, "logs");
+    static readonly object logLock = new();
     public static void Append(string s)
     {
-        try { File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "vast-llm.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + s + Environment.NewLine); } catch { }
+        lock (logLock)
+            try
+            {
+                Directory.CreateDirectory(LogDir);
+                File.AppendAllText(Path.Combine(LogDir, $"vast-llm-{DateTime.Now:yyyy-MM-dd}.log"), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {s}{Environment.NewLine}");
+            }
+            catch { }
+    }
+    // deletes day logs older than log_retention_days; the single log of versions before 1.3 moves into logs\
+    void CleanLogs()
+    {
+        try
+        {
+            var old = P("vast-llm.log");
+            if (File.Exists(old)) File.Move(old, Path.Combine(LogDir, "vast-llm-before-1.3.log"), true);
+            foreach (var f in Directory.GetFiles(LogDir, "vast-llm-*.log"))
+                if (File.GetLastWriteTime(f) < DateTime.Now.AddDays(-Math.Max(1, Cfg.LogDays))) { File.Delete(f); Debug("удалён старый журнал " + Path.GetFileName(f)); }
+        }
+        catch (Exception e) { Debug("очистка журналов: " + e.Message); }
     }
 
     // HKCU Run entry follows config.json "autostart"; --tray starts the window hidden
@@ -178,13 +208,15 @@ public class Core
                 var req = new HttpRequestMessage(m, url);
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Cfg.VastKey.Trim());
                 if (body != null) req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 var r = await http.SendAsync(req);
                 var txt = await r.Content.ReadAsStringAsync();
+                Debug($"vast {m.Method} {path} -> {(int)r.StatusCode} за {sw.ElapsedMilliseconds} мс{(i > 0 ? $", попытка {i + 1}" : "")}");
                 if (r.IsSuccessStatusCode) return string.IsNullOrWhiteSpace(txt) ? null : JsonNode.Parse(txt);
                 last = new Exception($"HTTP {(int)r.StatusCode}: {txt[..Math.Min(300, txt.Length)]}");
                 if ((int)r.StatusCode < 500 && (int)r.StatusCode != 429) throw last;
             }
-            catch (Exception e) when (e != last) { last = e; }
+            catch (Exception e) when (e != last) { last = e; Debug($"vast {m.Method} {path} ошибка: {e.Message}"); }
             await Task.Delay(3000 * (i + 1));
         }
         throw last;
@@ -212,6 +244,7 @@ public class Core
             var off = new Offer((long)o["id"], (long)o["machine_id"], (double)o["dph_total"], (double?)o["inet_down_cost"] ?? 0,
                                 (double?)o["inet_down"] ?? 0, (string)o["geolocation"] ?? "", (string)o["gpu_name"] ?? "");
             if (off.Dph <= Cfg.MaxDph && off.InetCost <= 0.01 && !St.BadMachines.Contains(off.Machine) && !off.Geo.Contains("CN")) list.Add(off);
+            else Debug($"предложение {off.Id} ({off.Geo}, ${off.Dph:F3}/ч) отброшено: {(off.Dph > Cfg.MaxDph ? "дороже лимита" : off.InetCost > 0.01 ? "платный трафик" : St.BadMachines.Contains(off.Machine) ? "машина в чёрном списке" : "Китай")}");
         }
         list = list.OrderBy(o => o.Dph + 20 * o.InetCost).ToList();
         if (list.Count > 1) // among offers within $0.05/h of the cheapest, fastest network first
@@ -286,8 +319,8 @@ public class Core
                         if (string.IsNullOrEmpty(hk)) { hk = e.FingerPrintSHA256; e.CanTrust = true; }
                         else e.CanTrust = hk == e.FingerPrintSHA256;
                     };
-                    try { await Task.Run(() => c.Connect(), ct); return (c, hk); }
-                    catch (Exception e) { last = e; c.Dispose(); }
+                    try { await Task.Run(() => c.Connect(), ct); Debug($"ssh {inst["public_ipaddr"]}:{port} машины {id}: подключено"); return (c, hk); }
+                    catch (Exception e) { last = e; c.Dispose(); Debug($"ssh {inst["public_ipaddr"]}:{port} машины {id}: {e.Message}"); }
                 }
                 if (DateTime.UtcNow - running > TimeSpan.FromMinutes(3)) throw new Exception("SSH недоступен 3 мин после старта: " + last.Message);
             }
@@ -303,7 +336,7 @@ public class Core
         // logged at once (the 30 s tick reconnects); a dead session is the usual reason ZCode sees ECONNREFUSED
         c.ErrorOccurred += (_, e) => Log("туннель: SSH-сессия оборвалась — " + e.Exception.Message);
         fwd = new ForwardedPortLocal("127.0.0.1", (uint)Cfg.LocalPort, "127.0.0.1", 8080);
-        fwd.RequestReceived += (_, _) => lastUse = DateTime.UtcNow;
+        fwd.RequestReceived += (_, _) => { lastUse = DateTime.UtcNow; Interlocked.Increment(ref tunnelRequests); };
         client.AddForwardedPort(fwd);
         fwd.Start();
         try
@@ -314,6 +347,9 @@ public class Core
         }
         catch (Exception e) { Log($"Grafana: порт {Cfg.GrafanaPort} занят ({e.Message})"); }
         Exec("touch /opt/llm/heartbeat");
+        // the card's power limit matters: the same GPU capped by its host runs up to 2x slower
+        var gpu = Exec("nvidia-smi --query-gpu=name,power.limit,power.default_limit,memory.total,driver_version --format=csv,noheader")?.Trim();
+        Log("видеокарта машины: " + (string.IsNullOrEmpty(gpu) ? "не удалось узнать" : gpu));
     }
 
     void CloseClient()
@@ -326,7 +362,8 @@ public class Core
 
     string Exec(string cmd)
     {
-        try { return client?.IsConnected == true ? client.RunCommand(cmd).Result : null; } catch { return null; }
+        try { return client?.IsConnected == true ? client.RunCommand(cmd).Result : null; }
+        catch (Exception e) { Debug($"команда на машине не выполнилась ({cmd.Split(' ')[0]}): {e.Message}"); return null; }
     }
 
     // ---------- Up / Down ----------
@@ -465,7 +502,13 @@ public class Core
             }
             catch (Exception e) { Log("переподключение не удалось: " + e.Message); return; }
         }
-        Exec("touch /opt/llm/heartbeat");
+        if (Exec("touch /opt/llm/heartbeat && echo ok")?.Trim() != "ok") Debug("пульс на машину не дошёл");
+        if (DateTime.UtcNow - lastStats > TimeSpan.FromMinutes(10))
+        {
+            lastStats = DateTime.UtcNow;
+            Debug($"туннель {(Tunnel ? "есть" : "нет")}, машина {St.Id} ({St.Gpu}, {St.Geo}), запросов через туннель за 10 мин: {Interlocked.Exchange(ref tunnelRequests, 0)}, без запросов {IdleMin} мин");
+            if (DateTime.Now.Hour == 4) CleanLogs();
+        }
     }
 
     // after a restart / PC reboot: reconcile state.json with what is really rented at Vast, then reconnect
@@ -474,6 +517,10 @@ public class Core
         LoadKey(); LoadState();
         var err = LoadConfig();
         if (err != null) Set("error", err);
+        CleanLogs();
+        Log($"настройки: GPU {Cfg.Gpu} до ${Cfg.MaxDph:F2}/ч, порты {Cfg.LocalPort}/{Cfg.GrafanaPort}, гонка двух хостов {(Cfg.Race ? "да" : "нет")}, " +
+            $"журнал {Cfg.LogDays} дн{(Cfg.Debug ? " с отладкой" : "")}");
+        Debug($"Windows {Environment.OSVersion.Version}, .NET {Environment.Version}, папка {Dir}, образ {Cfg.Image}");
         SyncAutostart();
         _ = RateAsync();
         if (Cfg.VastKey.Trim() == "") return;

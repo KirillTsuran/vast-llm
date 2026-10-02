@@ -37,6 +37,9 @@ public class MainForm : Form
     readonly Button up = new() { Text = "Up", Width = 110, Height = 34 }, down = new() { Text = "Down", Width = 110, Height = 34 };
     readonly Button copy = new() { Text = "Копировать", AutoSize = true }, folder = new() { Text = "Папка и config.json", AutoSize = true };
     readonly Button grafana = new() { Text = "Grafana", Width = 110, Height = 34 };
+    readonly Button logs = new() { Text = "Логи", AutoSize = true };
+    readonly ComboBox gpuBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Font = new Font("Segoe UI", 10) };
+    bool gpuLoading;
     readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Consolas", 9) };
     readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "VastLLM", Visible = true };
     readonly System.Windows.Forms.Timer ui = new() { Interval = 1000 }, tick = new() { Interval = 30000 };
@@ -51,7 +54,8 @@ public class MainForm : Form
         var urlRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         urlRow.Controls.AddRange(new Control[] { new Label { Text = "ZCode URL:", AutoSize = true, Padding = new Padding(0, 6, 0, 0) }, url, copy });
         var btnRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-        btnRow.Controls.AddRange(new Control[] { up, down, grafana, folder });
+        gpuBox.Items.AddRange(Config.DefaultPrices.Keys.ToArray<object>());
+        btnRow.Controls.AddRange(new Control[] { gpuBox, up, down, grafana, folder, logs });
         top.Controls.AddRange(new Control[] { phase, msg, info, urlRow, btnRow });
         Controls.Add(log); Controls.Add(top);
 
@@ -61,6 +65,17 @@ public class MainForm : Form
         down.Click += async (_, _) => await core.Down("вручную");
         copy.Click += (_, _) => Clipboard.SetText(url.Text);
         folder.Click += (_, _) => Process.Start("explorer.exe", core.Dir);
+        logs.Click += (_, _) => { Directory.CreateDirectory(Core.LogDir); Process.Start("explorer.exe", Core.LogDir); };
+        // the chosen GPU is used by the next Up; a machine already rented keeps its GPU until Down
+        gpuBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (gpuLoading || gpuBox.SelectedItem is not string g || g == core.Cfg.Gpu) return;
+            core.Cfg.Gpu = g; core.SaveConfig();
+            var rented = core.AllRented().FirstOrDefault(x => x.Main);
+            core.Log($"выбрана видеокарта {g} (до {core.Cfg.MaxDph * core.Cfg.UsdRub:F0} ₽/ч)" +
+                     (rented != null && rented.Gpu != g ? $"; сейчас арендована {rented.Gpu} — новая будет после Down → Up" : ""));
+            Refresh2();
+        };
         grafana.Click += (_, _) => Process.Start(new ProcessStartInfo($"http://127.0.0.1:{core.Cfg.GrafanaPort}/d/llm-metrics") { UseShellExecute = true });
         var show = new EventWaitHandle(false, EventResetMode.AutoReset, "VastLLM-show");
         new Thread(() => { while (show.WaitOne()) BeginInvokeSafe(() => { Show(); WindowState = FormWindowState.Normal; Activate(); }); }) { IsBackground = true }.Start();
@@ -74,7 +89,11 @@ public class MainForm : Form
         tray.ContextMenuStrip.Items.Add("Выход", null, (_, _) => Close());
         Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) { Hide(); tray.ShowBalloonTip(2000, "VastLLM", "Работает в трее", ToolTipIcon.Info); } };
         FormClosing += OnClosing;
-        Load += async (_, _) => { ui.Start(); tick.Start(); await core.Startup(); Refresh2(); };
+        Load += async (_, _) =>
+        {
+            core.LoadConfig(); gpuLoading = true; gpuBox.SelectedItem = core.Cfg.Gpu; gpuLoading = false;
+            ui.Start(); tick.Start(); await core.Startup(); Refresh2();
+        };
     }
 
     void BeginInvokeSafe(Action a) { if (IsHandleCreated && !IsDisposed) BeginInvoke(a); }
@@ -100,12 +119,15 @@ public class MainForm : Form
                 var h = (DateTime.UtcNow - x.Created).TotalHours;
                 return $"{(x.Main ? "●" : "○")} #{x.Id} · {x.Gpu} · {x.Geo} · {x.Dph * r:F1} ₽/ч · {(int)(h * 60)} мин · ≈ {h * x.Dph * r:F0} ₽{(x.Main ? "" : " (запуск)")}";
             });
+            var main = all.FirstOrDefault(x => x.Main);
             info.Text = $"Арендовано в Vast ({all.Count}), всего {all.Sum(x => x.Dph) * r:F1} ₽/ч:\n" + string.Join("\n", lines) +
-                        (core.Phase == "ready" ? $"\nТуннель {(core.Tunnel ? "есть" : "нет")} · без запросов {core.IdleMin} мин · удаляется только кнопкой Down" : "");
+                        (core.Phase == "ready" ? $"\nТуннель {(core.Tunnel ? "есть" : "нет")} · без запросов {core.IdleMin} мин · удаляется только кнопкой Down" : "") +
+                        (main != null && main.Gpu != core.Cfg.Gpu ? $"\nВыбрана {core.Cfg.Gpu}: будет после Down → Up" : "");
         }
         else info.Text = $"Ничего не арендовано · GPU: {core.Cfg.Gpu} до {core.Cfg.MaxDph * r:F0} ₽/ч · курс {r:F2} ₽/$";
         bool busy = core.Phase is "renting" or "booting" or "downloading" or "loading" or "stopping";
         up.Enabled = !busy && core.Phase != "ready";
+        gpuBox.Enabled = !busy;
         down.Enabled = all.Count > 0 && core.Phase != "stopping";
         grafana.Enabled = core.Tunnel;
         tray.Text = "VastLLM: " + phase.Text;
