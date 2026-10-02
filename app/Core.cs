@@ -80,7 +80,10 @@ public class Core
     readonly SemaphoreSlim busy = new(1, 1);
     CancellationTokenSource upCts;
     DateTime lastUse = DateTime.UtcNow, lastStats = DateTime.UtcNow;
-    int tunnelRequests;
+    int tunnelRequests, ticking;
+    bool lowCreditWarned;
+    public double? Credit;  // Vast balance in dollars (credit + balance); Vast stops every machine when it runs out
+    DateTime lastCredit = DateTime.MinValue;
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(40) };
     readonly object stateLock = new();
 
@@ -366,6 +369,8 @@ public class Core
     {
         var err = LoadConfig();
         if (err != null && Cfg.VastKey.Trim() == "") { Set("error", err); return; }
+        await CheckCredit();
+        if (Credit is < 0.5) { Set("error", $"на балансе Vast ${Credit:F2} — пополните на console.vast.ai, иначе Vast сразу остановит машину"); return; }
         if (!await busy.WaitAsync(0)) return;
         upCts = new CancellationTokenSource(); var ct = upCts.Token;
         var start = DateTime.UtcNow;
@@ -498,17 +503,54 @@ public class Core
     }
 
     // ---------- every 30 s: keep the tunnel alive (machines are deleted only by Down / race) ----------
+    public async Task CheckCredit()
+    {
+        try
+        {
+            var u = await Api(HttpMethod.Get, "/users/current/");
+            Credit = ((double?)u?["credit"] ?? 0) + ((double?)u?["balance"] ?? 0);
+            lastCredit = DateTime.UtcNow;
+            var dph = AllRented().Sum(x => x.Dph);
+            Debug($"баланс Vast ${Credit:F2}" + (dph > 0 ? $", при текущей аренде хватит примерно на {Credit / dph:F0} ч" : ""));
+            if (Credit < 1 && !lowCreditWarned)
+            {
+                lowCreditWarned = true;
+                Log($"⚠ баланс Vast почти кончился: ${Credit:F2}. На нуле Vast сам остановит машину — пополните на console.vast.ai");
+            }
+            if (Credit >= 1) lowCreditWarned = false;
+            Changed?.Invoke();
+        }
+        catch (Exception e) { Debug("баланс Vast не получен: " + e.Message); }
+    }
+
     public async Task Tick()
     {
-        if (St.Id == 0 || busy.CurrentCount == 0) return;
+        if (St.Id == 0 || busy.CurrentCount == 0) { if (DateTime.UtcNow - lastCredit > TimeSpan.FromMinutes(10)) await CheckCredit(); return; }
+        // one tick at a time: a reconnect can take minutes, the timer fires every 30 s
+        if (Interlocked.Exchange(ref ticking, 1) == 1) return;
+        try { await TickOnce(); } finally { ticking = 0; }
+    }
+
+    async Task TickOnce()
+    {
+        if (DateTime.UtcNow - lastCredit > TimeSpan.FromMinutes(10)) await CheckCredit();
         if (!Tunnel)
         {
             Log("связь потеряна, переподключаюсь");
             try
             {
-                if (await Instance(St.Id) == null) { CloseClient(); St.Id = 0; SaveState(); Set("error", "машина пропала у Vast — нажмите Up"); return; }
+                var inst = await Instance(St.Id);
+                if (inst == null) { CloseClient(); St.Id = 0; SaveState(); Set("error", "машина пропала у Vast — нажмите Up"); return; }
+                var st = (string)inst["actual_status"]; var intended = (string)inst["intended_status"];
+                if (st is "exited" or "stopped" || intended == "stopped")
+                {
+                    await CheckCredit();
+                    Set("error", $"Vast остановил машину {St.Id} (обычно — кончился баланс; сейчас ${Credit:F2}). Пополните баланс, затем Down и Up");
+                    return;
+                }
                 var (c, _) = await Dial(St.Id, St.HostKey, TimeSpan.FromMinutes(3), CancellationToken.None);
                 Attach(c); Log("связь восстановлена");
+                if (Phase == "error") Set("ready", "связь восстановлена");
             }
             catch (Exception e) { Log("переподключение не удалось: " + e.Message); return; }
         }
@@ -533,6 +575,7 @@ public class Core
         Debug($"Windows {Environment.OSVersion.Version}, .NET {Environment.Version}, папка {Dir}, образ {Cfg.Image}");
         SyncAutostart();
         _ = RateAsync();
+        if (Cfg.VastKey.Trim() != "") await CheckCredit();
         if (Cfg.VastKey.Trim() == "") return;
         try
         {

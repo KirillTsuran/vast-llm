@@ -125,6 +125,11 @@ public class MainForm : Form
                         (main != null && main.Gpu != core.Cfg.Gpu ? $"\nВыбрана {core.Cfg.Gpu}: будет после Down → Up" : "");
         }
         else info.Text = $"Ничего не арендовано · Up возьмёт самую дешёвую {core.Cfg.Gpu} · курс {r:F2} ₽/$";
+        if (core.Credit is double cr)
+        {
+            var dph = all.Sum(x => x.Dph);
+            info.Text += $"\nБаланс Vast: ${cr:F2} (≈ {cr * r:F0} ₽)" + (dph > 0 ? $" · хватит примерно на {cr / dph:F0} ч" : "") + (cr < 1 ? " · ⚠ пополните" : "");
+        }
         bool busy = core.Phase is "renting" or "booting" or "downloading" or "loading" or "stopping";
         up.Enabled = !busy && core.Phase != "ready";
         gpuBox.Enabled = !busy;
