@@ -15,10 +15,10 @@ public class Config
 {
     [JsonPropertyName("vast_api_key")] public string VastKey { get; set; } = "";
     [JsonPropertyName("gpu")] public string Gpu { get; set; } = "RTX 3090";
-    // GPU models offered in the window; each has its own price limit ($/h), Up rents the chosen one
-    public static readonly Dictionary<string, double> DefaultPrices = new() { ["RTX 3090"] = 0.40, ["RTX 4090"] = 0.60, ["RTX 5090"] = 0.85 };
-    [JsonPropertyName("max_price_usd_per_hour_by_gpu")] public Dictionary<string, double> MaxPrices { get; set; } = new(DefaultPrices);
-    [JsonIgnore] public double MaxDph => MaxPrices.TryGetValue(Gpu, out var v) ? v : DefaultPrices.GetValueOrDefault(Gpu, 0.40);
+    // GPU models offered in the window; Up rents the cheapest offers of the chosen one, no price limit
+    public static readonly string[] Gpus = { "RTX 3090", "RTX 4090", "RTX 5090" };
+    // the race rents the 2 cheapest; if the pricier one comes up first, the cheapest gets this many seconds to catch up
+    [JsonPropertyName("cheapest_grace_seconds")] public int Grace { get; set; } = 20;
     [JsonPropertyName("datacenter_only")] public bool Datacenter { get; set; } = false;
     [JsonPropertyName("race_two_hosts")] public bool Race { get; set; } = true;
     [JsonPropertyName("local_port")] public int LocalPort { get; set; } = 8080;
@@ -243,16 +243,11 @@ public class Core
         {
             var off = new Offer((long)o["id"], (long)o["machine_id"], (double)o["dph_total"], (double?)o["inet_down_cost"] ?? 0,
                                 (double?)o["inet_down"] ?? 0, (string)o["geolocation"] ?? "", (string)o["gpu_name"] ?? "");
-            if (off.Dph <= Cfg.MaxDph && off.InetCost <= 0.01 && !St.BadMachines.Contains(off.Machine) && !off.Geo.Contains("CN")) list.Add(off);
-            else Debug($"предложение {off.Id} ({off.Geo}, ${off.Dph:F3}/ч) отброшено: {(off.Dph > Cfg.MaxDph ? "дороже лимита" : off.InetCost > 0.01 ? "платный трафик" : St.BadMachines.Contains(off.Machine) ? "машина в чёрном списке" : "Китай")}");
+            if (off.InetCost <= 0.01 && !St.BadMachines.Contains(off.Machine) && !off.Geo.Contains("CN")) list.Add(off);
+            else Debug($"предложение {off.Id} ({off.Geo}, ${off.Dph:F3}/ч) отброшено: {(off.InetCost > 0.01 ? "платный трафик" : St.BadMachines.Contains(off.Machine) ? "машина в чёрном списке" : "Китай")}");
         }
-        list = list.OrderBy(o => o.Dph + 20 * o.InetCost).ToList();
-        if (list.Count > 1) // among offers within $0.05/h of the cheapest, fastest network first
-        {
-            var lim = list[0].Dph + 0.05;
-            var near = list.Where(o => o.Dph <= lim).OrderByDescending(o => o.Inet).ToList();
-            list = near.Concat(list.Where(o => o.Dph > lim)).ToList();
-        }
+        list = list.OrderBy(o => o.Dph).ThenByDescending(o => o.Inet).ToList();
+        Debug($"предложений {Cfg.Gpu}: {list.Count}, самые дешёвые: {string.Join(", ", list.Take(3).Select(o => $"${o.Dph:F3} {o.Geo}"))}");
         return list;
     }
 
@@ -391,8 +386,8 @@ public class Core
                 if (cands.Count == 0)
                 {
                     var offs = await Offers();
-                    if (offs.Count == 0) { Set("error", $"нет {Cfg.Gpu} дешевле ${Cfg.MaxDph}/ч — поднимите max_price_usd_per_hour"); return; }
-                    Set("renting", Cfg.Race ? $"арендую 2 машины {Cfg.Gpu}, оставлю первую поднявшуюся" : $"арендую {Cfg.Gpu}");
+                    if (offs.Count == 0) { Set("error", $"в Vast сейчас нет свободных {Cfg.Gpu} — выберите другую видеокарту или повторите Up"); return; }
+                    Set("renting", Cfg.Race ? $"арендую 2 самые дешёвые {Cfg.Gpu}, оставлю первую поднявшуюся (дешёвой даю {Cfg.Grace} с форы)" : $"арендую самую дешёвую {Cfg.Gpu}");
                     foreach (var o in offs.Take(Cfg.Race ? 2 : 1))
                     {
                         try
@@ -414,6 +409,7 @@ public class Core
                     try { var (c, hk) = await Dial(r.Id, "", TimeSpan.FromMinutes(10), race.Token); return (r, c, hk, (Exception)null); }
                     catch (Exception e) { return (r, (SshClient)null, "", e); }
                 })).ToList();
+                var byId = cands.Zip(tasks).ToDictionary(p => p.First.Id, p => p.Second);
                 bool won = false;
                 while (tasks.Count > 0)
                 {
@@ -426,6 +422,20 @@ public class Core
                         St.Pending.RemoveAll(x => x.Id == r.Id); SaveState();
                         _ = DestroyPending(r.Id);
                         continue;
+                    }
+                    // a pricier machine came up first: give the cheapest one a few seconds to catch up
+                    var cheap = cands.MinBy(x => x.Dph);
+                    if (cheap.Id != r.Id && byId.TryGetValue(cheap.Id, out var cheapTask) && tasks.Contains(cheapTask))
+                    {
+                        Log($"первой поднялась {r.Id} ({r.Dph * Cfg.UsdRub:F1} ₽/ч), жду до {Cfg.Grace} с более дешёвую {cheap.Id} ({cheap.Dph * Cfg.UsdRub:F1} ₽/ч)");
+                        if (await Task.WhenAny(cheapTask, Task.Delay(TimeSpan.FromSeconds(Cfg.Grace), ct)) == cheapTask && cheapTask.Result.Item4 == null)
+                        {
+                            tasks.Remove(cheapTask);
+                            Log($"дешёвая {cheap.Id} успела — беру её, {r.Id} удаляю");
+                            c.Dispose(); St.Pending.RemoveAll(x => x.Id == r.Id); SaveState(); _ = DestroyPending(r.Id);
+                            (r, c, hk, e) = cheapTask.Result;
+                        }
+                        else Log($"дешёвая {cheap.Id} не успела за {Cfg.Grace} с — оставляю {r.Id}");
                     }
                     won = true; race.Cancel();
                     St.Pending.RemoveAll(x => x.Id == r.Id);
@@ -518,7 +528,7 @@ public class Core
         var err = LoadConfig();
         if (err != null) Set("error", err);
         CleanLogs();
-        Log($"настройки: GPU {Cfg.Gpu} до ${Cfg.MaxDph:F2}/ч, порты {Cfg.LocalPort}/{Cfg.GrafanaPort}, гонка двух хостов {(Cfg.Race ? "да" : "нет")}, " +
+        Log($"настройки: GPU {Cfg.Gpu} (самая дешёвая, фора {Cfg.Grace} с), порты {Cfg.LocalPort}/{Cfg.GrafanaPort}, гонка двух хостов {(Cfg.Race ? "да" : "нет")}, " +
             $"журнал {Cfg.LogDays} дн{(Cfg.Debug ? " с отладкой" : "")}");
         Debug($"Windows {Environment.OSVersion.Version}, .NET {Environment.Version}, папка {Dir}, образ {Cfg.Image}");
         SyncAutostart();

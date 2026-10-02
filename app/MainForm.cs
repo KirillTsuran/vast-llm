@@ -54,7 +54,7 @@ public class MainForm : Form
         var urlRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         urlRow.Controls.AddRange(new Control[] { new Label { Text = "ZCode URL:", AutoSize = true, Padding = new Padding(0, 6, 0, 0) }, url, copy });
         var btnRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-        gpuBox.Items.AddRange(Config.DefaultPrices.Keys.ToArray<object>());
+        gpuBox.Items.AddRange(Config.Gpus.ToArray<object>());
         btnRow.Controls.AddRange(new Control[] { gpuBox, up, down, grafana, folder, logs });
         top.Controls.AddRange(new Control[] { phase, msg, info, urlRow, btnRow });
         Controls.Add(log); Controls.Add(top);
@@ -72,7 +72,7 @@ public class MainForm : Form
             if (gpuLoading || gpuBox.SelectedItem is not string g || g == core.Cfg.Gpu) return;
             core.Cfg.Gpu = g; core.SaveConfig();
             var rented = core.AllRented().FirstOrDefault(x => x.Main);
-            core.Log($"выбрана видеокарта {g} (до {core.Cfg.MaxDph * core.Cfg.UsdRub:F0} ₽/ч)" +
+            core.Log($"выбрана видеокарта {g}" +
                      (rented != null && rented.Gpu != g ? $"; сейчас арендована {rented.Gpu} — новая будет после Down → Up" : ""));
             Refresh2();
         };
@@ -124,7 +124,7 @@ public class MainForm : Form
                         (core.Phase == "ready" ? $"\nТуннель {(core.Tunnel ? "есть" : "нет")} · без запросов {core.IdleMin} мин · удаляется только кнопкой Down" : "") +
                         (main != null && main.Gpu != core.Cfg.Gpu ? $"\nВыбрана {core.Cfg.Gpu}: будет после Down → Up" : "");
         }
-        else info.Text = $"Ничего не арендовано · GPU: {core.Cfg.Gpu} до {core.Cfg.MaxDph * r:F0} ₽/ч · курс {r:F2} ₽/$";
+        else info.Text = $"Ничего не арендовано · Up возьмёт самую дешёвую {core.Cfg.Gpu} · курс {r:F2} ₽/$";
         bool busy = core.Phase is "renting" or "booting" or "downloading" or "loading" or "stopping";
         up.Enabled = !busy && core.Phase != "ready";
         gpuBox.Enabled = !busy;
