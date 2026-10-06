@@ -1,36 +1,63 @@
-# Production TabbyAPI build (base 816c321 + production overlays) + SS_LoopBreak + monitoring stack, for Vast.ai (runtype args, /opt/llm/entry.sh).
-# Model weights are NOT in the image: start.sh downloads pinned HF revisions with SHA256 checks.
-FROM python:3.12-slim-bookworm
-ENV PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1 HF_HUB_DISABLE_TELEMETRY=1
-RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ curl ca-certificates libgomp1 aria2 openssh-server procps \
+# syntax=docker/dockerfile:1
+# Strata engine (pinned commit) + llmd + monitoring stack, for Vast.ai (runtype args: /usr/local/bin/llmd).
+# Build context is the repository root: docker build -f image/Dockerfile .
+# Model weights are NOT in the image: llmd downloads the pinned revision in model.json with SHA256 checks.
+FROM golang:1.27 AS llmd
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY cmd/llmd cmd/llmd
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /llmd ./cmd/llmd
+
+FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 LANG=C.UTF-8
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates curl git libatomic1 libgomp1 \
+        python3 python3-pip python3-venv unzip openssh-server procps \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-ADD tabby-source.tgz /app/
-ARG EXL=exllamav3-1.5.3+cu128.torch2.11.0-cp312-cp312-linux_x86_64.whl
-# constraints.txt = pip freeze of the TabbyAPI environment that passed the tests: reproducible builds
-COPY constraints.txt /tmp/constraints.txt
-RUN pip install -c /tmp/constraints.txt torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128 \
-    && curl -fL -o /tmp/$EXL "https://github.com/turboderp-org/exllamav3/releases/download/v1.5.3/exllamav3-1.5.3%2Bcu128.torch2.11.0-cp312-cp312-linux_x86_64.whl" \
-    && echo "0cf0052ed8237218fc38d24e49a1cf9fffb3186851e07016de550fb696bc12e6  /tmp/$EXL" | sha256sum -c - \
-    && pip install -c /tmp/constraints.txt /tmp/$EXL transformers==5.17.0 . && rm /tmp/$EXL && pip freeze > /app/packages.lock
-COPY overlay/ /tmp/overlay/
-COPY loopbreak.py patch_tabby.py /tmp/lb/
-RUN SP=$(python -c 'import exllamav3,os;print(os.path.dirname(exllamav3.__file__))') \
-    && cp /tmp/overlay/job.py $SP/generator/job.py \
-    && cp /tmp/overlay/model.py backends/exllamav3/model.py \
-    && cp /tmp/overlay/chat_completion.py endpoints/OAI/utils/chat_completion.py \
-    && cp /tmp/overlay/errors.py common/errors.py && cp /tmp/overlay/auth.py common/auth.py \
-    && cp /tmp/overlay/observability.py /tmp/overlay/serve.py /app/ \
-    && python /tmp/lb/patch_tabby.py /app && rm -rf /tmp/overlay /tmp/lb
-# Monitoring stack (latest releases), all on 127.0.0.1; Grafana is reached through the app's SSH tunnel
+
+# The engine is compiled here the way Strata's own Dockerfile does it: docker build has no GPU, so the CUDA
+# architectures are fixed (a fat binary with a cubin per arch: RTX 30 = 86, RTX 40 = 89, RTX 50 = 120).
+# 6f32ec0 is engine 0.1.39, the version the model in model.json was measured on.
+ARG STRATA_COMMIT=6f32ec070f23ced9f50e704d854d775da52591ab
+ARG CUDA_ARCHITECTURES=86;89;120
+WORKDIR /opt/strata
+RUN git init -q . && git fetch -q --depth 1 https://github.com/Niko1221/Strata "$STRATA_COMMIT" && git checkout -q FETCH_HEAD \
+    && python3 -m venv .venv && .venv/bin/pip install --no-cache-dir -r requirements.txt
+RUN CUDA_ARCHITECTURES="$CUDA_ARCHITECTURES" .venv/bin/python - <<'PYEOF'
+import os, shutil
+import setup
+
+llama = setup.get_llama_cpp()  # llama.cpp at Strata's pinned commit; its gguf-py is what tools/iq_pack.py reads GGUF with
+nvcc, _ = setup.find_nvcc()
+setup.cmake_build(setup.ROOT, setup.ROOT / "build", "strata",
+    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={os.environ['CUDA_ARCHITECTURES']}",
+     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], None, "build-strata.bat")
+(setup.ROOT / "engine").mkdir(exist_ok=True)
+shutil.copy2(setup.ROOT / "build" / setup.EXE, setup.ROOT / "engine" / setup.EXE)
+shutil.rmtree(setup.ROOT / "build")
+PYEOF
+
+# Monitoring stack, all on 127.0.0.1; Grafana is reached through the app's SSH tunnel
 ARG PROM=3.15.0
 ARG NODE=1.12.1
 ARG LOKI=3.7.8
 ARG ALLOY=1.20.1
 ARG GRAF=13.2.3
-RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*     && curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM}/prometheus-${PROM}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/prometheus-${PROM}.linux-amd64 /opt/prometheus     && curl -fsSL "https://github.com/prometheus/node_exporter/releases/download/v${NODE}/node_exporter-${NODE}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/node_exporter-${NODE}.linux-amd64 /opt/node_exporter     && mkdir -p /opt/loki /opt/alloy     && curl -fsSL -o /tmp/loki.zip "https://github.com/grafana/loki/releases/download/v${LOKI}/loki-linux-amd64.zip" && unzip -q /tmp/loki.zip -d /opt/loki && mv /opt/loki/loki-linux-amd64 /opt/loki/loki     && curl -fsSL -o /tmp/alloy.zip "https://github.com/grafana/alloy/releases/download/v${ALLOY}/alloy-linux-amd64.zip" && unzip -q /tmp/alloy.zip -d /opt/alloy && mv /opt/alloy/alloy-linux-amd64 /opt/alloy/alloy     && chmod +x /opt/loki/loki /opt/alloy/alloy && rm /tmp/*.zip     && curl -fsSL "https://dl.grafana.com/oss/release/grafana-${GRAF}.linux-amd64.tar.gz" | tar -xz -C /opt     && mv /opt/grafana-* /opt/grafana
-COPY monitoring/ /opt/monitoring/
-COPY tabby-config.yml /app/config.yml
-COPY start.sh entry.sh download.py /opt/llm/
-COPY manifests/ /opt/llm/manifests/
-RUN chmod +x /opt/llm/start.sh /opt/llm/entry.sh
+RUN curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM}/prometheus-${PROM}.linux-amd64.tar.gz" | tar -xz -C /opt \
+    && mv /opt/prometheus-${PROM}.linux-amd64 /opt/prometheus \
+    && curl -fsSL "https://github.com/prometheus/node_exporter/releases/download/v${NODE}/node_exporter-${NODE}.linux-amd64.tar.gz" | tar -xz -C /opt \
+    && mv /opt/node_exporter-${NODE}.linux-amd64 /opt/node_exporter \
+    && mkdir -p /opt/loki /opt/alloy \
+    && curl -fsSL -o /tmp/loki.zip "https://github.com/grafana/loki/releases/download/v${LOKI}/loki-linux-amd64.zip" \
+    && unzip -q /tmp/loki.zip -d /opt/loki && mv /opt/loki/loki-linux-amd64 /opt/loki/loki \
+    && curl -fsSL -o /tmp/alloy.zip "https://github.com/grafana/alloy/releases/download/v${ALLOY}/alloy-linux-amd64.zip" \
+    && unzip -q /tmp/alloy.zip -d /opt/alloy && mv /opt/alloy/alloy-linux-amd64 /opt/alloy/alloy \
+    && chmod +x /opt/loki/loki /opt/alloy/alloy && rm /tmp/*.zip \
+    && curl -fsSL "https://dl.grafana.com/oss/release/grafana-${GRAF}.linux-amd64.tar.gz" | tar -xz -C /opt \
+    && mv /opt/grafana-* /opt/grafana
+
+COPY image/monitoring/ /opt/monitoring/
+COPY image/model.json /opt/llm/model.json
+COPY --from=llmd /llmd /usr/local/bin/llmd
+WORKDIR /root
+ENTRYPOINT []
+CMD ["/usr/local/bin/llmd"]

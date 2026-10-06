@@ -1,0 +1,21 @@
+{
+  "name": "sc117-abliterated-iq3_xxs",
+  "repo": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF",
+  "revision": "eec4e10a2c29b440a2ae85591fa11569ce752963",
+  "context": 262144,
+  "weights": {
+    "name": "IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00001-of-00002.gguf",
+    "size": 47342144896,
+    "sha256": "03b11926b41a3d7f7a008882b1bc7a6330a3c9c43d3cad4598d31dc73042fdc5"
+  },
+  "ple": {
+    "name": "IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00002-of-00002.gguf",
+    "size": 28800138432,
+    "sha256": "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"
+  },
+  "mtp": {
+    "name": "mtp-q2_0.gguf",
+    "size": 889017216,
+    "sha256": "a22206a4d74eafbf31063a84610292535fb3b49af9a339963817fd04aed81e4d"
+  }
+}
