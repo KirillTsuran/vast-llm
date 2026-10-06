@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	chunkSize   = 64 << 20
-	connections = 16
+	chunkSize = 64 << 20
+	// measured on a 923 Mbit/s host: 16 connections give 85 MB/s, 32 give 100-114, 48 are no faster
+	connections = 32
 	chunkTries  = 8
 )
 

@@ -31,6 +31,7 @@ type window struct {
 	log                     *walk.TextEdit
 	tray                    *walk.NotifyIcon
 	exiting, loadingGPU     bool
+	restoring               bool
 	lastPhase, lastInfoText string
 }
 
@@ -75,7 +76,7 @@ func runWindow(core *app.Core, startInTray bool, showEvent windows.Handle) error
 	w.mw.Closing().Attach(w.closing)
 	// minimizing hides the window: the program lives in the tray
 	w.mw.SizeChanged().Attach(func() {
-		if win.IsIconic(w.mw.Handle()) {
+		if !w.restoring && win.IsIconic(w.mw.Handle()) {
 			w.mw.Hide()
 			w.tray.ShowInfo("VastLLM", "Работает в трее")
 		}
@@ -112,9 +113,12 @@ func runWindow(core *app.Core, startInTray bool, showEvent windows.Handle) error
 
 func open(target string) { exec.Command("explorer.exe", target).Start() }
 
+// show brings the window back from the tray. While it is being restored it still looks minimized to the
+// size handler, which must not hide it again.
 func (w *window) show() {
-	w.mw.Show()
+	w.restoring = true
 	win.ShowWindow(w.mw.Handle(), win.SW_RESTORE)
+	w.restoring = false
 	win.SetForegroundWindow(w.mw.Handle())
 }
 

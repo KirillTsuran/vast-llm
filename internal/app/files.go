@@ -120,6 +120,12 @@ func (c *Core) setConfig(cfg Config) {
 
 // saveState is atomic: a crash or power loss never leaves a half-written state.json. Callers hold c.mu.
 func (c *Core) saveState() {
+	if c.st.BadMachines == nil {
+		c.st.BadMachines = []int64{} // written as [] rather than null
+	}
+	if c.st.Pending == nil {
+		c.st.Pending = []Rented{}
+	}
 	if err := writeJSON(c.path("state.json"), c.st); err != nil {
 		c.logLocked("state.json не записан: " + err.Error())
 	}
