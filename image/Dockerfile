@@ -29,7 +29,9 @@ import setup
 llama = setup.get_llama_cpp()  # llama.cpp at Strata's pinned commit; its gguf-py is what tools/iq_pack.py reads GGUF with
 nvcc, _ = setup.find_nvcc()
 setup.cmake_build(setup.ROOT, setup.ROOT / "build", "strata",
-    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={os.environ['CUDA_ARCHITECTURES']}",
+    # STRATA_PORTABLE: without it ggml is compiled for the CPU of the build host (GGML_NATIVE), and an engine built on
+    # a runner with AVX-512 dies with "Illegal instruction" on a rented machine without it. Portable is the AVX2 set.
+    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_PORTABLE=ON", f"-DCMAKE_CUDA_ARCHITECTURES={os.environ['CUDA_ARCHITECTURES']}",
      f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], None, "build-strata.bat")
 (setup.ROOT / "engine").mkdir(exist_ok=True)
 shutil.copy2(setup.ROOT / "build" / setup.EXE, setup.ROOT / "engine" / setup.EXE)
