@@ -1,0 +1,172 @@
+{
+  "engine": {
+    "model": "sc117-abliterated-iq3_xxs",
+    "max_context": 262144,
+    "images": false,
+    "version": "0.1.39",
+    "context": 262144,
+    "kv": "int8",
+    "kv_resident": 32768,
+    "expert_slots": 9388,
+    "expert_cache_mib": 15582,
+    "expert_slots_primary": 9388,
+    "expert_cache_primary_mib": 15582,
+    "spec": 6,
+    "mtp_max": 4,
+    "lookup": 3,
+    "vram_free_mib": 1810,
+    "cvec": 0,
+    "arena_mib": 40925,
+    "pool_workers": 14,
+    "pcie_frac": "0.55",
+    "spec_min_p": "0.50",
+    "conversation_cache_mib": 0,
+    "conversation_cache_slots": 4,
+    "conversation_cache_min_free_mib": 2560,
+    "tail_role_token": -1,
+    "vram_elastic": 0,
+    "engine": "0.1.39"
+  },
+  "live": {
+    "state": "idle",
+    "queued": 0,
+    "phase": null,
+    "prompt_tokens": null,
+    "prompt_read": null,
+    "prompt_total": null,
+    "generated": null,
+    "max_tokens": null,
+    "elapsed_s": null,
+    "tok_s": null,
+    "tok_s_mean": null,
+    "prefill_tok_s_mean": null,
+    "tok_s_window_s": null
+  },
+  "requests": [
+    {
+      "projection": null,
+      "time": 1791259854.9498172,
+      "duration_s": 0.3,
+      "finish": "stop",
+      "prompt_tokens": 14,
+      "reused": 0,
+      "output_tokens": 2,
+      "prompt_total": 14,
+      "prompt_read": 14,
+      "engine_generated": 2,
+      "prompt_ms": 219.2,
+      "decode_ms": 92.1,
+      "decode_tok_s": 21.7,
+      "hit_rate": 0.65,
+      "pcie_share": 0.237,
+      "ram_blobs": 0,
+      "file_blobs": 0,
+      "file_mb": 0.0,
+      "drafts_offered": 3,
+      "drafts_accepted": 3
+    }
+  ],
+  "conversation_cache": {
+    "enabled": false,
+    "budget_mib": 0,
+    "slots": 4,
+    "parked": 0,
+    "bytes": 0,
+    "evictions": 0,
+    "parks": 0,
+    "restores": 0,
+    "last_event": null,
+    "last_tokens": null,
+    "last_at": null,
+    "requests": 1,
+    "requests_reused": 0,
+    "reused_tokens": 0,
+    "prompt_tokens": 14,
+    "last_reused": 0,
+    "last_prompt": 14
+  },
+  "requests_kept": 1,
+  "totals": {
+    "since": 1791259854.2479126,
+    "requests": 1,
+    "prompt_tokens": 14,
+    "reused": 0,
+    "output_tokens": 2,
+    "prompt_ms": 219.2,
+    "decode_ms": 92.1,
+    "drafts_offered": 3,
+    "drafts_accepted": 3
+  },
+  "hardware": {
+    "gpu_util": 0,
+    "gpu_mem_used": 23925948416,
+    "gpu_mem_total": 25769803776,
+    "gpu_temp": 50,
+    "gpu_power": 107.05,
+    "gpu_power_limit": 350.0,
+    "gpu_pcie_gen": 4,
+    "gpu_pcie_gen_max": 4,
+    "gpu_pcie_width": 16,
+    "gpu_pcie_rx_mb": 0.380859375,
+    "gpu_pcie_tx_mb": 0.6669921875,
+    "cpu": 31.4,
+    "ram_used": 51809337344,
+    "ram_total": 67342688256,
+    "disk_read_mb": 1.739557121115634,
+    "disk_write_mb": 0.0,
+    "tok_s": 0.0,
+    "tok_s_mean": 0,
+    "prefill_tok_s_mean": 0.0
+  },
+  "hardware_static": {
+    "gpu_name": "NVIDIA GeForce RTX 3090",
+    "gpu_count": 1,
+    "cpu_name": "AMD Ryzen 7 5700X 8-Core Processor",
+    "cores": 8,
+    "threads": 16,
+    "psutil": true
+  },
+  "history": {
+    "gpu_util": [
+      1,
+      0
+    ],
+    "gpu_mem_used": [
+      23871422464,
+      23925948416
+    ],
+    "gpu_temp": [
+      49,
+      50
+    ],
+    "gpu_power": [
+      108.68,
+      107.05
+    ],
+    "gpu_pcie_rx_mb": [
+      0.38,
+      0.38
+    ],
+    "cpu": [
+      0.0,
+      31.4
+    ],
+    "ram_used": [
+      51740254208,
+      51809337344
+    ],
+    "disk_read_mb": [
+      null,
+      1.74
+    ],
+    "tok_s": [
+      0.0,
+      0.0
+    ],
+    "prefill_tok_s_mean": [
+      0.0,
+      0.0
+    ]
+  },
+  "time": 1791259855.476035
+}
