@@ -107,6 +107,13 @@ func TestEngineConfig(t *testing.T) {
 			t.Errorf("args lack %q: %s", want, args)
 		}
 	}
+	if cfg["parallel"] != nil {
+		t.Errorf("one request at a time is the engine's default: no \"parallel\" key, got %v", cfg["parallel"])
+	}
+	m.Parallel = 3
+	if got := engineConfig(m, 15)["parallel"]; got != 3 {
+		t.Errorf("three slots must reach the engine's config, got %v", got)
+	}
 	if strings.Contains(args, "--prompt-cache") || cfg["repeat_stop_tokens"] != nil || cfg["host"] != "127.0.0.1" {
 		t.Errorf("prompt cache and repeat guard stay at the engine's defaults, the API stays on loopback: %v", cfg)
 	}
