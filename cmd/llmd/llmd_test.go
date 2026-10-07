@@ -128,7 +128,7 @@ func TestMetrics(t *testing.T) {
 	if err := json.Unmarshal(raw, &stats); err != nil {
 		t.Fatal(err)
 	}
-	var finished finishCounter
+	var finished requestLog
 	var b strings.Builder
 	engineMetrics(&b, stats, &finished)
 	b.Reset()
@@ -145,7 +145,7 @@ func TestMetrics(t *testing.T) {
 		"llm_container_oom_kills_total 2\n", "llm_container_cpu_seconds_total 2.5\n", "llm_container_cpu_limit_cores 15.36\n",
 		"llm_container_disk_read_bytes_total 105\n", "llm_container_disk_written_bytes_total 11\n",
 		"llm_context_tokens 262144\n", "llm_expert_cache_mib 15582\n", "llm_requests_processing 0\n", "llm_requests_total 1\n",
-		"llm_output_tokens_total 2\n", "llm_decode_seconds_total 0.092", "llm_drafts_accepted_total 3\n",
+		"llm_output_tokens_total 2\n", "llm_request_seconds_total 0.3\n", "llm_request_output_tokens_total 2\n", "llm_slots_total 1\n", "llm_drafts_accepted_total 3\n",
 		"llm_finished_total{finish=\"stop\"} 1\n", "llm_finished_total{finish=\"length\"} 0\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -159,7 +159,7 @@ func TestMetrics(t *testing.T) {
 
 func TestDashboards(t *testing.T) {
 	boards := dashboards()
-	for name, wantPanels := range map[string]int{"llm-metrics.json": 38, "llm-logs.json": 9} {
+	for name, wantPanels := range map[string]int{"llm-metrics.json": 41, "llm-logs.json": 9} {
 		var d struct {
 			UID    string
 			Panels []struct {
@@ -214,4 +214,63 @@ func TestDownloadFromHuggingFace(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("%d bytes, SHA256 ok, %.0f MB/s", got.Load(), float64(got.Load())/1e6/time.Since(start).Seconds())
+}
+
+// GET /metrics of the engine with "parallel": 3 while two requests run in slots (taken from the production machine):
+// live describes only the newest request, the dashboards must show both.
+func TestMetricsOfParallelSlots(t *testing.T) {
+	var stats engineStats
+	raw := `{"live": {"state": "generating", "queued": 0, "prompt_tokens": 45727, "generated": 375, "tok_s": 54.6, "parallel": 3, "running": 2, "waiting": 1,
+		"slots": [{"slot": 0, "state": "decoding", "prompt_tokens": 22454, "generated": 24588, "tok_s": 56.4}, {"slot": 1, "state": "idle", "held_tokens": 449},
+		{"slot": 2, "state": "decoding", "prompt_tokens": 45727, "generated": 375, "tok_s": 27.8}]}}`
+	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	engineMetrics(&b, stats, &requestLog{})
+	for _, want := range []string{"llm_requests_processing 2\n", "llm_requests_queued 1\n", "llm_live_tok_s 84.2", "llm_live_tok_s_per_request 42.1", "llm_live_request_tokens 47042\n", "llm_slots_total 3\n", "llm_slots_busy 2\n", "llm_live_longest_answer_tokens 24588\n"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, b.String())
+		}
+	}
+}
+
+// The engine lists finished requests by when they ended and stamps them with when they started: with slots a request
+// that started earlier can end later, and more than the list holds can end between two scrapes.
+func TestRequestLog(t *testing.T) {
+	scrape := func(l *requestLog, total float64, starts ...float64) requestTotals {
+		var s engineStats
+		s.Totals.Requests = total
+		for _, at := range starts {
+			s.Requests = append(s.Requests, struct {
+				Time     float64 `json:"time"`
+				Finish   string  `json:"finish"`
+				Duration float64 `json:"duration_s"`
+				PromptMs float64 `json:"prompt_ms"`
+				Output   float64 `json:"output_tokens"`
+			}{at, "stop", 10, 2000, 240})
+		}
+		return l.add(s)
+	}
+	var l requestLog
+	scrape(&l, 2, 100, 300)
+	got := scrape(&l, 3, 100, 300, 200) // started before 300, ended after it
+	if got.finished["stop"] != 3 || got.finished["unknown"] != 0 {
+		t.Errorf("a request that started earlier and ended later must be counted: %v", got.finished)
+	}
+	if got.seconds != 30 || got.promptSecs != 6 || got.output != 720 {
+		t.Errorf("each request adds its time and tokens once: %+v", got)
+	}
+	got = scrape(&l, 3, 100, 300, 200)
+	if got.finished["stop"] != 3 {
+		t.Errorf("the same list again adds nothing: %v", got.finished)
+	}
+	got = scrape(&l, 8, 300, 200, 400) // five ended, the list shows one new
+	if got.finished["stop"] != 4 || got.finished["unknown"] != 4 {
+		t.Errorf("answers that left the list unseen are counted as unknown: %v", got.finished)
+	}
+	got = scrape(&l, 1, 500) // the engine restarted: its totals start over
+	if got.finished["stop"] != 5 || got.finished["unknown"] != 4 {
+		t.Errorf("after an engine restart: %v", got.finished)
+	}
 }
