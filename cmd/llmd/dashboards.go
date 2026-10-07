@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 type obj = map[string]any
@@ -93,12 +94,15 @@ func (b *board) lines(title string, x, w int, l look, qs ...q) {
 	if l.stack {
 		stacking = "normal"
 	}
-	overrides := []obj{}
-	for _, t := range qs {
-		if c, ok := l.colors[t.name]; ok {
-			overrides = append(overrides, obj{"matcher": obj{"id": "byName", "options": t.name},
-				"properties": []obj{{"id": "color", "value": obj{"mode": "fixed", "fixedColor": c}}}})
-		}
+	overrides := []obj{} // by series name: a query like {{finish}} yields names that are not in qs
+	names := make([]string, 0, len(l.colors))
+	for name := range l.colors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		overrides = append(overrides, obj{"matcher": obj{"id": "byName", "options": name},
+			"properties": []obj{{"id": "color", "value": obj{"mode": "fixed", "fixedColor": l.colors[name]}}}})
 	}
 	body := obj{"targets": targets(l, false, qs),
 		"fieldConfig": obj{"defaults": obj{"unit": l.unit, "min": 0, "decimals": l.decimals, "custom": obj{"lineWidth": 2, "fillOpacity": fill,
@@ -137,45 +141,63 @@ func dashboards() map[string][]byte {
 
 	m := &board{}
 	m.row("Сейчас")
-	m.stat("Скорость, ток/с", 0, 4, look{color: "green", noValue: "нет ответов",
-		desc: "Средняя скорость написания ответов за последний час: написанные токены / время, пока модель писала. Простой не учитывается"},
-		q{"sum(increase(llm_output_tokens_total[1h])) / (sum(increase(llm_decode_seconds_total[1h])) > 0)", ""})
+	m.stat("Скорость одного запроса, ток/с", 0, 4, look{color: "green", noValue: "нет ответов",
+		desc: "Средняя скорость написания ответа за последний час по завершённым запросам: написанные токены / время запроса без чтения. " +
+			"Когда запросы идут одновременно, каждый пишет медленнее, и это число падает"},
+		q{"sum(increase(llm_request_output_tokens_total[1h])) / (sum(increase(llm_request_seconds_total[1h])) - sum(increase(llm_request_prompt_seconds_total[1h])) > 0)", ""})
 	m.stat("Ответов за час", 4, 4, look{}, q{"round(sum(increase(llm_requests_total[1h]))) or vector(0)", ""})
 	m.stat("Запросы сейчас", 8, 4, look{color: "purple",
-		desc: "«В работе» — запросы, которые модель читает или пишет прямо сейчас (до трёх одновременно). «Ждут» — запросы в очереди"},
+		desc: "«В работе» — запросы, которые модель читает или пишет прямо сейчас. «Ждут» — запросы, до которых очередь ещё не дошла"},
 		q{"sum(llm_requests_processing) or vector(0)", "в работе"}, q{"sum(llm_requests_queued) or vector(0)", "ждут"})
 	m.stat("Оборвано по длине, сутки", 12, 4, look{color: "red",
 		desc: "Ответы, которые закончились не сами: упёрлись в лимит длины или движок оборвал повтор одного токена. Много таких подряд — признак зацикливания"},
 		q{`round(sum(increase(llm_finished_total{finish="length"}[24h]))) or vector(0)`, ""})
-	m.stat("Перезапусков движка, сутки", 16, 4, look{color: "red",
+	m.stat("Запас памяти", 16, 4, look{unit: "bytes", color: "orange", decimals: 1,
+		desc: "Сколько памяти контейнера ещё не занято программами (лимит минус программы). Каждый одновременный запрос держит свой контекст в памяти. " +
+			"Если запас дойдёт до нуля, ядро убьёт движок"},
+		q{"min(llm_container_memory_limit_bytes - llm_container_memory_programs_bytes)", ""})
+	m.stat("Перезапусков движка, сутки", 20, 4, look{color: "red",
 		desc: "Сколько раз движок падал и был запущен снова. Причина — в логах strata и engine перед строкой «exited»"},
 		q{"round(sum(increase(llm_engine_restarts_total[24h]))) or vector(0)", ""})
-	m.stat("Загрузка GPU", 20, 4, look{unit: "percent", color: "yellow"}, q{"llm_gpu_util_percent", ""})
 	m.y += 4
 
-	m.row("Модель: скорость прямо сейчас")
+	m.row("Модель: скорость и одновременные запросы")
 	m.lines("Пишет ответ, ток/с", 0, 8, look{colors: map[string]string{"все запросы вместе": "green", "в среднем на запрос": "blue"},
 		desc: "С какой скоростью модель пишет в этот момент: суммарно по всем одновременным запросам и в среднем на один. " +
 			"Когда запросов несколько, каждый идёт медленнее, чем шёл бы один. Пусто — модель ничего не пишет"},
 		q{"llm_live_tok_s > 0", "все запросы вместе"}, q{"llm_live_tok_s_per_request > 0", "в среднем на запрос"})
-	m.lines("Читает запрос, ток/с", 8, 8, look{colors: map[string]string{"скорость": "blue"},
-		desc: "С какой скоростью модель читает новую часть запроса (то, чего нет в кэше). Пусто — модель ничего не читает"},
-		q{"llm_live_prefill_tok_s > 0", "скорость"})
-	m.lines("Запросы: в работе и в очереди", 16, 8, look{step: true, colors: map[string]string{"в работе": "purple", "ждут в очереди": "orange"},
-		desc: "Сколько запросов модель обрабатывает одновременно (до трёх) и сколько ждут свободного места"},
-		q{"max(max_over_time(llm_requests_processing" + rate + "))", "в работе"}, q{"max(max_over_time(llm_requests_queued" + rate + "))", "ждут в очереди"})
+	m.lines("Читает запрос, ток/с", 8, 8, look{colors: map[string]string{"скорость за 5 мин": "blue"},
+		desc: "С какой скоростью модель читала новую часть запросов (то, чего нет в кэше) за последние 5 минут. Пусто — новых запросов не было"},
+		q{"(sum(increase(llm_prompt_tokens_total[5m])) - sum(increase(llm_reused_tokens_total[5m]))) / (sum(increase(llm_prompt_seconds_total[5m])) > 0)", "скорость за 5 мин"})
+	m.lines("Запросы: в работе и в очереди", 16, 8, look{step: true, colors: map[string]string{"в работе": "purple", "ждут": "orange", "слотов всего": "red"},
+		desc: "Сколько запросов модель обрабатывает одновременно и сколько ждут. «Слотов всего» — предел одновременных запросов, остальные ждут в очереди"},
+		q{"max(max_over_time(llm_requests_processing" + rate + "))", "в работе"}, q{"max(max_over_time(llm_requests_queued" + rate + "))", "ждут"},
+		q{"max(llm_slots_total)", "слотов всего"})
 	m.y += 9
 
 	m.row("Модель: ответы и кэш")
-	m.lines("Ответы по итогу, штук", 0, 8, look{stack: true, bars: true, interval: "5m", colors: map[string]string{"stop": "green", "length": "red"},
-		desc: "Сколько запросов закончилось за промежуток и чем: stop — модель закончила сама, length — оборвано по длине или из-за повтора"},
+	m.lines("Ответы по итогу, штук", 0, 8, look{stack: true, bars: true, interval: "5m",
+		colors: map[string]string{"stop": "green", "length": "red", "cancel": "text", "disconnect": "orange", "error": "dark-red", "unknown": "purple"},
+		desc: "Сколько запросов закончилось за промежуток и чем: stop — модель закончила сама, length — оборвано по длине или из-за повтора, " +
+			"cancel и disconnect — клиент отменил или отключился, unknown — ответ закончился, но причина не попала в метрики"},
 		q{"round(sum by (finish) (increase(llm_finished_total[$__interval])))", "{{finish}}"})
-	m.lines("Черновики приняты, %", 8, 8, look{unit: "percent", colors: map[string]string{"принято за 10 мин": "green"},
-		desc: "Доля черновых токенов, которые модель приняла (по ответам за 10 минут). Чем выше, тем быстрее ответ"},
-		q{share("llm_drafts_accepted_total", "llm_drafts_offered_total"), "принято за 10 мин"})
+	m.lines("Черновики, %", 8, 8, look{unit: "percent", colors: map[string]string{"принято из предложенных": "green", "доля ответа из черновиков": "blue"},
+		desc: "Черновики ускоряют только запрос, который идёт один: при одновременных запросах движок их не использует. " +
+			"«Доля ответа из черновиков» падает, когда запросы идут вместе, — это и есть цена одновременной работы"},
+		q{share("llm_drafts_accepted_total", "llm_drafts_offered_total"), "принято из предложенных"},
+		q{share("llm_drafts_accepted_total", "llm_output_tokens_total"), "доля ответа из черновиков"})
 	m.lines("Запрос взят из кэша, %", 16, 8, look{unit: "percent", colors: map[string]string{"из кэша за 10 мин": "green"},
 		desc: "Какая часть токенов запросов за 10 минут не читалась заново, а взялась из кэша диалога. Чем выше, тем быстрее начинается ответ"},
 		q{share("llm_reused_tokens_total", "llm_prompt_tokens_total"), "из кэша за 10 мин"})
+	m.y += 9
+
+	m.row("Модель: долгие запросы")
+	m.lines("Самый долгий запрос в работе, секунд", 0, 12, look{unit: "s", colors: map[string]string{"идёт уже": "orange"},
+		desc: "Сколько времени идёт самый долгий из запросов, которые модель обрабатывает сейчас. Растёт десятки минут — возможно, ответ зациклился"},
+		q{"max(max_over_time(llm_live_longest_request_seconds" + rate + ")) > 0", "идёт уже"})
+	m.lines("Самый длинный ответ в работе, токенов", 12, 12, look{colors: map[string]string{"написано": "orange"},
+		desc: "Сколько токенов (рассуждение и текст) уже написал самый длинный из текущих ответов. Десятки тысяч без конца — признак зацикливания"},
+		q{"max(max_over_time(llm_live_longest_answer_tokens" + rate + ")) > 0", "написано"})
 	m.y += 9
 
 	m.row("Модель: контекст и видеопамять движка")

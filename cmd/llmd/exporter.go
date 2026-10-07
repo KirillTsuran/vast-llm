@@ -20,22 +20,35 @@ var cgroupDir = "/sys/fs/cgroup"
 // serveMetrics is the Prometheus exporter on 127.0.0.1:9101: the GPU (nvidia-smi), this container's own limits and
 // usage (cgroup v2; node_exporter sees the whole Vast host), and the engine's JSON /metrics turned into counters.
 func serveMetrics(addr string) {
-	var finished finishCounter
+	var log requestLog
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		// the engine answers between generation steps, which takes seconds under load: it gets nearly the whole
+		// scrape timeout (9 s) and does not wait for nvidia-smi
+		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()
+		type gpuAnswer struct {
+			csv []byte
+			err error
+		}
+		gpu := make(chan gpuAnswer, 1)
+		go func() {
+			gpuCtx, stop := context.WithTimeout(ctx, 4*time.Second)
+			defer stop()
+			out, err := exec.CommandContext(gpuCtx, "nvidia-smi", "--query-gpu="+gpuQuery, "--format=csv,noheader,nounits").Output()
+			gpu <- gpuAnswer{out, err}
+		}()
+		engine, err := fetchEngine(ctx, engineURL+"/metrics")
 		var b strings.Builder
-		if out, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu="+gpuQuery, "--format=csv,noheader,nounits").Output(); err != nil {
-			fmt.Fprintf(&b, "# gpu: %v\n", err)
+		if g := <-gpu; g.err != nil {
+			fmt.Fprintf(&b, "# gpu: %v\n", g.err)
 		} else {
-			gpuMetrics(&b, string(out))
+			gpuMetrics(&b, string(g.csv))
 		}
 		containerMetrics(&b, cgroupDir)
-		engine, err := fetchEngine(ctx, engineURL+"/metrics")
 		gauge(&b, "llm_engine_up", b2f(err == nil))
 		if err == nil {
-			engineMetrics(&b, engine, &finished)
+			engineMetrics(&b, engine, &log)
 		}
 		counterLine(&b, "llm_engine_restarts_total", float64(engineRestarts.Load()))
 		w.Write([]byte(b.String()))
@@ -141,17 +154,19 @@ type engineStats struct {
 		State   string   `json:"state"` // idle | reading | generating | unloaded
 		Queued  float64  `json:"queued"`
 		TokS    *float64 `json:"tok_s"`
-		Prefill *float64 `json:"prefill_tok_s_mean"`
 		Prompt  *float64 `json:"prompt_tokens"`
 		Written *float64 `json:"generated"`
+		Elapsed *float64 `json:"elapsed_s"`
 		// with "parallel" slots: live above describes only the newest request, these describe all of them
-		Running float64 `json:"running"`
-		Waiting float64 `json:"waiting"`
-		Slots   []struct {
+		Parallel float64 `json:"parallel"`
+		Running  float64 `json:"running"`
+		Waiting  float64 `json:"waiting"`
+		Slots    []struct {
 			State   string  `json:"state"` // idle | decoding | ...
 			Prompt  float64 `json:"prompt_tokens"`
 			Written float64 `json:"generated"`
 			TokS    float64 `json:"tok_s"`
+			Elapsed float64 `json:"elapsed_s"`
 		} `json:"slots"`
 	} `json:"live"`
 	Totals struct { // since the engine started
@@ -160,13 +175,15 @@ type engineStats struct {
 		Reused   float64 `json:"reused"`
 		Output   float64 `json:"output_tokens"`
 		PromptMs float64 `json:"prompt_ms"`
-		DecodeMs float64 `json:"decode_ms"`
 		Offered  float64 `json:"drafts_offered"`
 		Accepted float64 `json:"drafts_accepted"`
 	} `json:"totals"`
-	Requests []struct { // the last 12
-		Time   float64 `json:"time"`
-		Finish string  `json:"finish"`
+	Requests []struct { // the last 12 that ended, ordered by when they ended
+		Time     float64 `json:"time"` // when it started
+		Finish   string  `json:"finish"`
+		Duration float64 `json:"duration_s"`
+		PromptMs float64 `json:"prompt_ms"`
+		Output   float64 `json:"output_tokens"`
 	} `json:"requests"`
 }
 
@@ -187,35 +204,60 @@ func fetchEngine(ctx context.Context, url string) (engineStats, error) {
 	return s, json.NewDecoder(resp.Body).Decode(&s)
 }
 
-// finishCounter counts answers by how they ended; the engine only lists its last requests, so each is counted once.
-type finishCounter struct {
-	mu     sync.Mutex
-	seen   float64 // time of the newest request already counted
-	counts map[string]float64
+// requestLog turns the engine's list of its last 12 finished requests into counters: answers by how they ended, and
+// the time and tokens of each. The engine's own totals cannot give the speed: for a request decoded in a slot they
+// count the tokens but only the first token's decode time.
+type requestLog struct {
+	mu         sync.Mutex
+	seen       map[float64]bool // start times listed at the previous scrape: the list is ordered by end, not by start
+	lastTotal  float64          // totals.requests at the previous scrape
+	started    bool
+	finished   map[string]float64
+	seconds    float64 // whole duration of the counted requests
+	promptSecs float64 // of it, reading the prompt
+	output     float64 // tokens they wrote
 }
 
-func (f *finishCounter) add(s engineStats) map[string]float64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.counts == nil {
-		f.counts = map[string]float64{"stop": 0, "length": 0}
+type requestTotals struct {
+	finished                    map[string]float64
+	seconds, promptSecs, output float64
+}
+
+func (l *requestLog) add(s engineStats) requestTotals {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.finished == nil { // every way an answer ends, so that the first one of a kind is an increase from 0
+		l.finished = map[string]float64{"stop": 0, "length": 0, "cancel": 0, "disconnect": 0, "error": 0, "unknown": 0}
 	}
-	newest := f.seen
+	now, fresh := map[float64]bool{}, 0.0
 	for _, r := range s.Requests {
-		if r.Time > f.seen {
-			f.counts[r.Finish]++
-			newest = max(newest, r.Time)
+		now[r.Time] = true
+		if l.seen[r.Time] {
+			continue
 		}
+		fresh++
+		l.finished[r.Finish]++
+		l.seconds += r.Duration
+		l.promptSecs += r.PromptMs / 1000
+		l.output += r.Output
 	}
-	f.seen = newest
-	out := map[string]float64{}
-	for k, v := range f.counts {
-		out[k] = v
+	// more answers ended since the last scrape than the list still shows (or a scrape failed): counted, reason unknown
+	ended := s.Totals.Requests - l.lastTotal
+	if ended < 0 { // the engine restarted
+		ended = s.Totals.Requests
+	}
+	if l.started && ended > fresh {
+		l.finished["unknown"] += ended - fresh
+	}
+	l.seen, l.lastTotal, l.started = now, s.Totals.Requests, true
+	out := requestTotals{map[string]float64{}, l.seconds, l.promptSecs, l.output}
+	for k, v := range l.finished {
+		out.finished[k] = v
 	}
 	return out
 }
 
-func engineMetrics(b *strings.Builder, s engineStats, finished *finishCounter) {
+func engineMetrics(b *strings.Builder, s engineStats, log *requestLog) {
 	val := func(p *float64) float64 {
 		if p == nil {
 			return 0
@@ -225,43 +267,68 @@ func engineMetrics(b *strings.Builder, s engineStats, finished *finishCounter) {
 	gauge(b, "llm_context_tokens", s.Engine.MaxContext)
 	gauge(b, "llm_expert_cache_mib", s.Engine.CacheMiB)
 	gauge(b, "llm_vram_free_mib", s.Engine.FreeMiB)
-	// one request alone runs outside the slots and is described by live itself; requests that run together sit in
-	// slots, and live then shows only the newest of them: the speed is the sum over the slots, the size the largest
-	processing := b2f(s.Live.State == "reading" || s.Live.State == "generating")
-	speed, size, inSlots := val(s.Live.TokS), val(s.Live.Prompt)+val(s.Live.Written), 0.0
+
+	// One request alone runs outside the slots and is described by live itself. Requests that run together sit in
+	// slots, and live then shows only the newest of them: the speed is the sum over the slots.
+	busy := s.Live.State == "reading" || s.Live.State == "generating"
+	speed, elapsed, written := 0.0, 0.0, 0.0
+	size := val(s.Live.Prompt) + val(s.Live.Written)
+	if s.Live.State == "generating" {
+		speed = val(s.Live.TokS)
+	}
+	if busy {
+		elapsed, written = val(s.Live.Elapsed), val(s.Live.Written)
+	}
+	inSlots, decoding := 0.0, 0.0
 	for _, slot := range s.Live.Slots {
 		if slot.State == "idle" {
 			continue
 		}
 		if inSlots == 0 {
-			speed, size = 0, 0
+			speed = 0
 		}
 		inSlots++
 		speed += slot.TokS
-		size = max(size, slot.Prompt+slot.Written)
+		if slot.TokS > 0 {
+			decoding++
+		}
+		written = max(written, slot.Written)
+		elapsed = max(elapsed, slot.Elapsed)
+		// a request moved into a slot mid-answer reports what it had written by then as prompt too, so the sum is an
+		// upper bound; the newest request has the exact numbers in live
+		if slot.Written != val(s.Live.Written) {
+			size = max(size, slot.Prompt+slot.Written)
+		}
 	}
-	gauge(b, "llm_requests_processing", max(processing, s.Live.Running, inSlots))
-	gauge(b, "llm_requests_queued", s.Live.Queued+s.Live.Waiting)
+	gauge(b, "llm_slots_total", max(s.Live.Parallel, 1))
+	gauge(b, "llm_slots_busy", inSlots)
+	gauge(b, "llm_requests_processing", max(b2f(busy), s.Live.Running, inSlots))
+	gauge(b, "llm_requests_queued", max(s.Live.Queued, s.Live.Waiting))
 	gauge(b, "llm_live_tok_s", speed)
-	gauge(b, "llm_live_tok_s_per_request", speed/max(inSlots, 1))
-	gauge(b, "llm_live_prefill_tok_s", b2f(s.Live.State == "reading")*val(s.Live.Prefill))
+	gauge(b, "llm_live_tok_s_per_request", speed/max(decoding, 1))
 	gauge(b, "llm_live_request_tokens", size)
+	gauge(b, "llm_live_longest_request_seconds", elapsed)
+	gauge(b, "llm_live_longest_answer_tokens", written)
+
 	counterLine(b, "llm_requests_total", s.Totals.Requests)
 	counterLine(b, "llm_prompt_tokens_total", s.Totals.Prompt)
 	counterLine(b, "llm_reused_tokens_total", s.Totals.Reused)
 	counterLine(b, "llm_output_tokens_total", s.Totals.Output)
 	counterLine(b, "llm_prompt_seconds_total", s.Totals.PromptMs/1000)
-	counterLine(b, "llm_decode_seconds_total", s.Totals.DecodeMs/1000)
 	counterLine(b, "llm_drafts_offered_total", s.Totals.Offered)
 	counterLine(b, "llm_drafts_accepted_total", s.Totals.Accepted)
-	counts := finished.add(s)
-	reasons := make([]string, 0, len(counts))
-	for reason := range counts {
+
+	t := log.add(s)
+	counterLine(b, "llm_request_seconds_total", t.seconds)
+	counterLine(b, "llm_request_prompt_seconds_total", t.promptSecs)
+	counterLine(b, "llm_request_output_tokens_total", t.output)
+	reasons := make([]string, 0, len(t.finished))
+	for reason := range t.finished {
 		reasons = append(reasons, reason)
 	}
 	sort.Strings(reasons)
 	b.WriteString("# TYPE llm_finished_total counter\n")
 	for _, reason := range reasons {
-		fmt.Fprintf(b, "llm_finished_total{finish=%q} %g\n", reason, counts[reason])
+		fmt.Fprintf(b, "llm_finished_total{finish=%q} %g\n", reason, t.finished[reason])
 	}
 }
