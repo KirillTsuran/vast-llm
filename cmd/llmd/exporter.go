@@ -144,6 +144,15 @@ type engineStats struct {
 		Prefill *float64 `json:"prefill_tok_s_mean"`
 		Prompt  *float64 `json:"prompt_tokens"`
 		Written *float64 `json:"generated"`
+		// with "parallel" slots: live above describes only the newest request, these describe all of them
+		Running float64 `json:"running"`
+		Waiting float64 `json:"waiting"`
+		Slots   []struct {
+			State   string  `json:"state"` // idle | decoding | ...
+			Prompt  float64 `json:"prompt_tokens"`
+			Written float64 `json:"generated"`
+			TokS    float64 `json:"tok_s"`
+		} `json:"slots"`
 	} `json:"live"`
 	Totals struct { // since the engine started
 		Requests float64 `json:"requests"`
@@ -216,11 +225,27 @@ func engineMetrics(b *strings.Builder, s engineStats, finished *finishCounter) {
 	gauge(b, "llm_context_tokens", s.Engine.MaxContext)
 	gauge(b, "llm_expert_cache_mib", s.Engine.CacheMiB)
 	gauge(b, "llm_vram_free_mib", s.Engine.FreeMiB)
-	gauge(b, "llm_requests_processing", b2f(s.Live.State == "reading" || s.Live.State == "generating"))
-	gauge(b, "llm_requests_queued", s.Live.Queued)
-	gauge(b, "llm_live_tok_s", val(s.Live.TokS))
+	// one request alone runs outside the slots and is described by live itself; requests that run together sit in
+	// slots, and live then shows only the newest of them: the speed is the sum over the slots, the size the largest
+	processing := b2f(s.Live.State == "reading" || s.Live.State == "generating")
+	speed, size, inSlots := val(s.Live.TokS), val(s.Live.Prompt)+val(s.Live.Written), 0.0
+	for _, slot := range s.Live.Slots {
+		if slot.State == "idle" {
+			continue
+		}
+		if inSlots == 0 {
+			speed, size = 0, 0
+		}
+		inSlots++
+		speed += slot.TokS
+		size = max(size, slot.Prompt+slot.Written)
+	}
+	gauge(b, "llm_requests_processing", max(processing, s.Live.Running, inSlots))
+	gauge(b, "llm_requests_queued", s.Live.Queued+s.Live.Waiting)
+	gauge(b, "llm_live_tok_s", speed)
+	gauge(b, "llm_live_tok_s_per_request", speed/max(inSlots, 1))
 	gauge(b, "llm_live_prefill_tok_s", b2f(s.Live.State == "reading")*val(s.Live.Prefill))
-	gauge(b, "llm_live_request_tokens", val(s.Live.Prompt)+val(s.Live.Written))
+	gauge(b, "llm_live_request_tokens", size)
 	counterLine(b, "llm_requests_total", s.Totals.Requests)
 	counterLine(b, "llm_prompt_tokens_total", s.Totals.Prompt)
 	counterLine(b, "llm_reused_tokens_total", s.Totals.Reused)

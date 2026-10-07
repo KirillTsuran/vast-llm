@@ -215,3 +215,22 @@ func TestDownloadFromHuggingFace(t *testing.T) {
 	}
 	t.Logf("%d bytes, SHA256 ok, %.0f MB/s", got.Load(), float64(got.Load())/1e6/time.Since(start).Seconds())
 }
+
+// GET /metrics of the engine with "parallel": 3 while two requests run in slots (taken from the production machine):
+// live describes only the newest request, the dashboards must show both.
+func TestMetricsOfParallelSlots(t *testing.T) {
+	var stats engineStats
+	raw := `{"live": {"state": "generating", "queued": 0, "prompt_tokens": 45727, "generated": 375, "tok_s": 54.6, "parallel": 3, "running": 2, "waiting": 1,
+		"slots": [{"slot": 0, "state": "decoding", "prompt_tokens": 22454, "generated": 24588, "tok_s": 56.4}, {"slot": 1, "state": "idle", "held_tokens": 449},
+		{"slot": 2, "state": "decoding", "prompt_tokens": 45727, "generated": 375, "tok_s": 27.8}]}}`
+	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	engineMetrics(&b, stats, &finishCounter{})
+	for _, want := range []string{"llm_requests_processing 2\n", "llm_requests_queued 1\n", "llm_live_tok_s 84.2", "llm_live_tok_s_per_request 42.1", "llm_live_request_tokens 47042\n"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, b.String())
+		}
+	}
+}
