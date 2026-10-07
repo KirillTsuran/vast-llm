@@ -27,7 +27,7 @@ const (
 	logDir    = "/var/log/llm"
 	stateFile = "/opt/llm/state"
 	engineURL = "http://127.0.0.1:8080"
-	// the engine's measured peak is 55.6 GiB inside the container (RTX 3090, context 262144)
+	// measured peak of everything in the container with model.json's three slots full: 56.7 GiB (context 262144)
 	minRAMGiB = 58
 )
 
@@ -37,9 +37,10 @@ type Model struct {
 	Repo     string `json:"repo"`
 	Revision string `json:"revision"`
 	Context  int    `json:"context"`
-	Weights  File   `json:"weights"` // GGUF shard 1: iq_pack source, native projections
-	PLE      File   `json:"ple"`     // GGUF shard 2: the PLE lookup table, read from disk
-	MTP      File   `json:"mtp"`     // draft layer
+	Parallel int    `json:"parallel"` // requests decoded at once, each with the whole context; more wait in the queue
+	Weights  File   `json:"weights"`  // GGUF shard 1: iq_pack source, native projections
+	PLE      File   `json:"ple"`      // GGUF shard 2: the PLE lookup table, read from disk
+	MTP      File   `json:"mtp"`      // draft layer
 }
 
 type File struct {
@@ -264,7 +265,7 @@ func bringUp(m Model) error {
 // default counts the host's cores, which halves the speed on a machine with a quota.
 func engineConfig(m Model, cpus int) map[string]any {
 	pack := dataDir + "/pack"
-	return map[string]any{
+	cfg := map[string]any{
 		"exe": strataDir + "/engine/strata",
 		"args": []string{
 			"--pack", pack, "--native", m.path(m.Weights), "--ple-gguf", m.path(m.PLE),
@@ -276,6 +277,12 @@ func engineConfig(m Model, cpus int) map[string]any {
 		"cwd": strataDir, "tokenizer": pack + "/tokenizer", "model_name": m.Name, "lib_dirs": []string{"/usr/local/cuda-13.0/lib64"},
 		"host": "127.0.0.1", "port": 8080, "open_browser": false, "log": logDir + "/engine.log",
 	}
+	// every slot keeps its own context: +3.1 GiB of RAM and -0.95 GiB of the expert cache in VRAM. Three slots with
+	// three 243K-token prompts at once peak at 56.7 GiB for the whole container, under the 60.2 GiB of a 64 GB host.
+	if m.Parallel > 1 {
+		cfg["parallel"] = m.Parallel
+	}
+	return cfg
 }
 
 // checkMachine refuses hosts the engine cannot run on, so the app takes another one instead of waiting for a crash.
