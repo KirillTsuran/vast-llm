@@ -162,13 +162,19 @@ type engineStats struct {
 		Running  float64 `json:"running"`
 		Waiting  float64 `json:"waiting"`
 		Slots    []struct {
-			State   string  `json:"state"` // idle | decoding | ...
+			// no tok_s: a request moved into a slot mid-answer brings its earlier tokens along, while the slot's clock
+			// starts at the move, and showed thousands of tok/s
+			State   string  `json:"state"` // idle | reading | decoding
 			Prompt  float64 `json:"prompt_tokens"`
 			Written float64 `json:"generated"`
-			TokS    float64 `json:"tok_s"`
 			Elapsed float64 `json:"elapsed_s"`
 		} `json:"slots"`
 	} `json:"live"`
+	Hardware struct {
+		// sampled every second: the sum over all running requests of the tokens each wrote in the last 2 s; unlike
+		// live.tok_s it is there while the newest request still reads its prompt
+		TokS *float64 `json:"tok_s"`
+	} `json:"hardware"`
 	Totals struct { // since the engine started
 		Requests float64 `json:"requests"`
 		Prompt   float64 `json:"prompt_tokens"`
@@ -269,11 +275,13 @@ func engineMetrics(b *strings.Builder, s engineStats, log *requestLog) {
 	gauge(b, "llm_vram_free_mib", s.Engine.FreeMiB)
 
 	// One request alone runs outside the slots and is described by live itself. Requests that run together sit in
-	// slots, and live then shows only the newest of them: the speed is the sum over the slots.
+	// slots, and live then shows only the newest of them. The speed is the engine's sum over all of them.
 	busy := s.Live.State == "reading" || s.Live.State == "generating"
 	speed, elapsed, written := 0.0, 0.0, 0.0
 	size := val(s.Live.Prompt) + val(s.Live.Written)
-	if s.Live.State == "generating" {
+	if s.Hardware.TokS != nil {
+		speed = *s.Hardware.TokS
+	} else if s.Live.State == "generating" {
 		speed = val(s.Live.TokS)
 	}
 	if busy {
@@ -284,12 +292,8 @@ func engineMetrics(b *strings.Builder, s engineStats, log *requestLog) {
 		if slot.State == "idle" {
 			continue
 		}
-		if inSlots == 0 {
-			speed = 0
-		}
 		inSlots++
-		speed += slot.TokS
-		if slot.TokS > 0 {
+		if slot.State == "decoding" {
 			decoding++
 		}
 		written = max(written, slot.Written)
