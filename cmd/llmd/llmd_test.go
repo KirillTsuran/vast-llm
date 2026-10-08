@@ -107,6 +107,9 @@ func TestEngineConfig(t *testing.T) {
 			t.Errorf("args lack %q: %s", want, args)
 		}
 	}
+	if cfg["fit_max_tokens"] != true {
+		t.Errorf("prompt + max_tokens over the context must shorten the answer, not fail with 400: %v", cfg["fit_max_tokens"])
+	}
 	if cfg["parallel"] != nil {
 		t.Errorf("one request at a time is the engine's default: no \"parallel\" key, got %v", cfg["parallel"])
 	}
