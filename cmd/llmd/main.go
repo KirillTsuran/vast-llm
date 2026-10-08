@@ -276,6 +276,9 @@ func engineConfig(m Model, cpus int) map[string]any {
 		},
 		"cwd": strataDir, "tokenizer": pack + "/tokenizer", "model_name": m.Name, "lib_dirs": []string{"/usr/local/cuda-13.0/lib64"},
 		"host": "127.0.0.1", "port": 8080, "open_browser": false, "log": logDir + "/engine.log",
+		// a client that asks for more answer than the context has left (ZCode: up to 131072 tokens beside a 131K-token
+		// prompt) gets the answer shortened to the room left instead of a 400 that stops its turn
+		"fit_max_tokens": true,
 	}
 	// every slot keeps its own context: +3.1 GiB of RAM and -0.95 GiB of the expert cache in VRAM. Three slots with
 	// three 243K-token prompts at once peak at 56.7 GiB for the whole container, under the 60.2 GiB of a 64 GB host.
