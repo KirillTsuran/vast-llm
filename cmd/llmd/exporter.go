@@ -304,6 +304,11 @@ func engineMetrics(b *strings.Builder, s engineStats, log *requestLog) {
 			size = max(size, slot.Prompt+slot.Written)
 		}
 	}
+	// nothing writes, yet the engine's sum is not 0: a request that waits (for a slot, or reads its prompt again after
+	// a move) counts there with its mean since its first token. While slots are busy no request writes outside them.
+	if inSlots > 0 && decoding == 0 || inSlots == 0 && s.Live.State != "generating" {
+		speed = 0
+	}
 	gauge(b, "llm_slots_total", max(s.Live.Parallel, 1))
 	gauge(b, "llm_slots_busy", inSlots)
 	gauge(b, "llm_requests_processing", max(b2f(busy), s.Live.Running, inSlots))

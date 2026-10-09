@@ -150,6 +150,7 @@ func TestMetrics(t *testing.T) {
 		"llm_context_tokens 262144\n", "llm_expert_cache_mib 15582\n", "llm_requests_processing 0\n", "llm_requests_total 1\n",
 		"llm_output_tokens_total 2\n", "llm_request_seconds_total 0.3\n", "llm_request_output_tokens_total 2\n", "llm_slots_total 1\n", "llm_drafts_accepted_total 3\n",
 		"llm_finished_total{finish=\"stop\"} 1\n", "llm_finished_total{finish=\"length\"} 0\n",
+		"llm_live_tok_s 0\n", "llm_live_tok_s_per_request 0\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q", want)
@@ -252,6 +253,11 @@ func TestSpeedOfSlots(t *testing.T) {
 			{"slot": 0, "state": "decoding", "prompt_tokens": 9000, "generated": 1800, "tok_s": 150.0, "elapsed_s": 20.5},
 			{"slot": 1, "state": "reading", "prompt_tokens": 120000, "generated": 0, "tok_s": null, "elapsed_s": 6.0}]},
 			"hardware": {"tok_s": 66.4}}`, "66.4", "66.4"},
+		{"a moved request reads its prompt again while the other one waits: nothing writes",
+			`{"live": {"state": "reading", "tok_s": null, "parallel": 3, "running": 2, "slots": [
+			{"slot": 0, "state": "reading", "prompt_tokens": 9000, "generated": 0, "elapsed_s": 4.0}]},
+			"hardware": {"tok_s": 70.0}}`, "0", "0"},
+		{"the engine is idle, the last sample is a second old", `{"live": {"state": "idle"}, "hardware": {"tok_s": 12.5}}`, "0", "0"},
 		{"one request alone", `{"live": {"state": "generating", "tok_s": 82.8}, "hardware": {"tok_s": 82.8}}`, "82.8", "82.8"},
 		{"an engine without hardware sampling", `{"live": {"state": "generating", "tok_s": 79.5}}`, "79.5", "79.5"},
 	} {
