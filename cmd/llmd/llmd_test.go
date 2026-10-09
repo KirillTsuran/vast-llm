@@ -150,6 +150,7 @@ func TestMetrics(t *testing.T) {
 		"llm_context_tokens 262144\n", "llm_expert_cache_mib 15582\n", "llm_requests_processing 0\n", "llm_requests_total 1\n",
 		"llm_output_tokens_total 2\n", "llm_request_seconds_total 0.3\n", "llm_request_output_tokens_total 2\n", "llm_slots_total 1\n", "llm_drafts_accepted_total 3\n",
 		"llm_finished_total{finish=\"stop\"} 1\n", "llm_finished_total{finish=\"length\"} 0\n",
+		"llm_live_tok_s 0\n", "llm_live_tok_s_per_request 0\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q", want)
@@ -225,15 +226,51 @@ func TestMetricsOfParallelSlots(t *testing.T) {
 	var stats engineStats
 	raw := `{"live": {"state": "generating", "queued": 0, "prompt_tokens": 45727, "generated": 375, "tok_s": 54.6, "parallel": 3, "running": 2, "waiting": 1,
 		"slots": [{"slot": 0, "state": "decoding", "prompt_tokens": 22454, "generated": 24588, "tok_s": 56.4}, {"slot": 1, "state": "idle", "held_tokens": 449},
-		{"slot": 2, "state": "decoding", "prompt_tokens": 45727, "generated": 375, "tok_s": 27.8}]}}`
+		{"slot": 2, "state": "decoding", "prompt_tokens": 45727, "generated": 375, "tok_s": 27.8}]}, "hardware": {"tok_s": 61.3}}`
 	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
 		t.Fatal(err)
 	}
 	var b strings.Builder
 	engineMetrics(&b, stats, &requestLog{})
-	for _, want := range []string{"llm_requests_processing 2\n", "llm_requests_queued 1\n", "llm_live_tok_s 84.2", "llm_live_tok_s_per_request 42.1", "llm_live_request_tokens 47042\n", "llm_slots_total 3\n", "llm_slots_busy 2\n", "llm_live_longest_answer_tokens 24588\n"} {
+	for _, want := range []string{"llm_requests_processing 2\n", "llm_requests_queued 1\n", "llm_live_tok_s 61.3\n", "llm_live_tok_s_per_request 30.65\n", "llm_live_request_tokens 47042\n", "llm_slots_total 3\n", "llm_slots_busy 2\n", "llm_live_longest_answer_tokens 24588\n"} {
 		if !strings.Contains(b.String(), want) {
 			t.Errorf("missing %q in:\n%s", want, b.String())
+		}
+	}
+}
+
+// The speed comes from the engine's sum over all requests (hardware.tok_s), never from a slot's tok_s: a request moved
+// into a slot mid-answer reports everything it wrote divided by the time since the move.
+func TestSpeedOfSlots(t *testing.T) {
+	for _, c := range []struct{ name, raw, speed, perRequest string }{
+		{"a request just moved into a slot",
+			`{"live": {"state": "generating", "tok_s": 70.1, "parallel": 3, "running": 2, "slots": [
+			{"slot": 0, "state": "decoding", "prompt_tokens": 9000, "generated": 1500, "tok_s": 3000.0, "elapsed_s": 0.5},
+			{"slot": 1, "state": "decoding", "prompt_tokens": 300, "generated": 4, "tok_s": 20.0, "elapsed_s": 0.2}]},
+			"hardware": {"tok_s": 70.1}}`, "70.1", "35.05"},
+		{"the newest request still reads its prompt while another writes",
+			`{"live": {"state": "reading", "tok_s": null, "parallel": 3, "running": 2, "slots": [
+			{"slot": 0, "state": "decoding", "prompt_tokens": 9000, "generated": 1800, "tok_s": 150.0, "elapsed_s": 20.5},
+			{"slot": 1, "state": "reading", "prompt_tokens": 120000, "generated": 0, "tok_s": null, "elapsed_s": 6.0}]},
+			"hardware": {"tok_s": 66.4}}`, "66.4", "66.4"},
+		{"a moved request reads its prompt again while the other one waits: nothing writes",
+			`{"live": {"state": "reading", "tok_s": null, "parallel": 3, "running": 2, "slots": [
+			{"slot": 0, "state": "reading", "prompt_tokens": 9000, "generated": 0, "elapsed_s": 4.0}]},
+			"hardware": {"tok_s": 70.0}}`, "0", "0"},
+		{"the engine is idle, the last sample is a second old", `{"live": {"state": "idle"}, "hardware": {"tok_s": 12.5}}`, "0", "0"},
+		{"one request alone", `{"live": {"state": "generating", "tok_s": 82.8}, "hardware": {"tok_s": 82.8}}`, "82.8", "82.8"},
+		{"an engine without hardware sampling", `{"live": {"state": "generating", "tok_s": 79.5}}`, "79.5", "79.5"},
+	} {
+		var stats engineStats
+		if err := json.Unmarshal([]byte(c.raw), &stats); err != nil {
+			t.Fatal(c.name, err)
+		}
+		var b strings.Builder
+		engineMetrics(&b, stats, &requestLog{})
+		for _, want := range []string{"llm_live_tok_s " + c.speed + "\n", "llm_live_tok_s_per_request " + c.perRequest + "\n"} {
+			if !strings.Contains(b.String(), want) {
+				t.Errorf("%s: missing %q in:\n%s", c.name, want, b.String())
+			}
 		}
 	}
 }
