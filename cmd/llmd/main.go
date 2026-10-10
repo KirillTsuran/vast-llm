@@ -245,7 +245,17 @@ func bringUp(m Model) error {
 	}
 	setState("loading")
 	// the engine is restarted if it ever exits (CUDA error, out of memory, crash); the reason stays in strata.log
-	keep("strata", strataDir, []string{"STRATA_NO_LARGEPAGES=1"}, func() { engineRestarts.Add(1); setState("loading") },
+	var crashes crashLoop
+	keep("strata", strataDir, []string{"STRATA_NO_LARGEPAGES=1"}, func() {
+		engineRestarts.Add(1)
+		// an engine that cannot start (a flag it does not know, out of memory, a CUDA error) would be restarted forever
+		// while the machine is billed: after 5 exits in 10 minutes the app is told the machine failed
+		if crashes.exit(time.Now()) {
+			setState("failed движок падает: " + crashReason(tail(filepath.Join(logDir, "strata.log"), 8192)))
+			return
+		}
+		setState("loading")
+	},
 		strataDir+"/.venv/bin/python", "-m", "serve.server", "--engine", "strata", "--config", "/opt/llm/strata.json", "--port", "8080")
 	go func() { // ready once a real request is answered, not merely when the port is open
 		probing := &http.Client{Timeout: 2 * time.Minute}
@@ -331,6 +341,12 @@ func memoryLimit(cgroup, meminfo string) int64 {
 			return n
 		}
 	}
+	// cgroup v1: "no limit" is written there as a huge number
+	if raw, err := os.ReadFile(filepath.Join(cgroup, "memory", "memory.limit_in_bytes")); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil && n < 1<<60 {
+			return n
+		}
+	}
 	raw, _ := os.ReadFile(meminfo)
 	for _, line := range strings.Split(string(raw), "\n") {
 		if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemTotal:" {
@@ -341,7 +357,7 @@ func memoryLimit(cgroup, meminfo string) int64 {
 	return 0
 }
 
-// cpuLimit is the number of CPUs the container may use: its cgroup quota, else every CPU it sees.
+// cpuLimit is the number of CPUs the container may use: its cgroup quota (v2, else v1), else every CPU it sees.
 func cpuLimit(cgroup string) int {
 	if raw, err := os.ReadFile(filepath.Join(cgroup, "cpu.max")); err == nil {
 		if f := strings.Fields(string(raw)); len(f) == 2 && f[0] != "max" {
@@ -350,6 +366,15 @@ func cpuLimit(cgroup string) int {
 			if quota > 0 && period > 0 {
 				return int(quota / period)
 			}
+		}
+	}
+	for _, dir := range []string{"cpu", "cpu,cpuacct"} {
+		quota, err1 := os.ReadFile(filepath.Join(cgroup, dir, "cpu.cfs_quota_us"))
+		period, err2 := os.ReadFile(filepath.Join(cgroup, dir, "cpu.cfs_period_us"))
+		q, _ := strconv.ParseFloat(strings.TrimSpace(string(quota)), 64)
+		p, _ := strconv.ParseFloat(strings.TrimSpace(string(period)), 64)
+		if err1 == nil && err2 == nil && q > 0 && p > 0 {
+			return int(q / p)
 		}
 	}
 	out, _ := exec.Command("nproc").Output()
@@ -378,6 +403,45 @@ func physicalCores(cpuinfo string) int {
 		}
 	}
 	return len(cores)
+}
+
+// crashLoop counts the engine's exits; exit says whether there were 5 within 10 minutes.
+type crashLoop struct{ at []time.Time }
+
+func (c *crashLoop) exit(t time.Time) bool {
+	keep := c.at[:0]
+	for _, a := range c.at {
+		if t.Sub(a) < 10*time.Minute {
+			keep = append(keep, a)
+		}
+	}
+	c.at = append(keep, t)
+	return len(c.at) >= 5
+}
+
+// crashReason is the engine's last line before keep's own "exited" lines: what it died of.
+func crashReason(log []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(log)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" && !strings.Contains(line, " exited (") {
+			return line
+		}
+	}
+	return "причина не записана"
+}
+
+// tail is the last n bytes of a file.
+func tail(path string, n int64) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if info, err := f.Stat(); err == nil && info.Size() > n {
+		f.Seek(info.Size()-n, io.SeekStart)
+	}
+	out, _ := io.ReadAll(f)
+	return out
 }
 
 func lastLine(out []byte) string {

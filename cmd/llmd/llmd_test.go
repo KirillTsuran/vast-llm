@@ -98,6 +98,52 @@ func TestMachineChecks(t *testing.T) {
 	}
 }
 
+// an engine that cannot start is not restarted forever while the machine is billed
+func TestCrashLoop(t *testing.T) {
+	var c crashLoop
+	start := time.Now()
+	for i := range 4 {
+		if c.exit(start.Add(time.Duration(i) * time.Minute)) {
+			t.Fatalf("exit %d of 4 within 10 minutes is no loop yet", i+1)
+		}
+	}
+	if !c.exit(start.Add(4 * time.Minute)) {
+		t.Error("the 5th exit within 10 minutes is a loop")
+	}
+	var spread crashLoop
+	for i := range 6 {
+		if spread.exit(start.Add(time.Duration(i) * 5 * time.Minute)) {
+			t.Errorf("exits 5 minutes apart are no loop (exit %d)", i+1)
+		}
+	}
+	log := []byte("strata generate: loading\nRuntimeError: CUDA out of memory\n2026-10-11 01:00:00 strata exited (exit status 1), restart in 5s\n")
+	if got := crashReason(log); got != "RuntimeError: CUDA out of memory" {
+		t.Errorf("the engine's own last line, not keep's: %q", got)
+	}
+}
+
+// hosts with cgroup v1 write the limits elsewhere; without them the whole host would be taken for the container's
+func TestCgroupV1Limits(t *testing.T) {
+	dir := cgroup(t, map[string]string{})
+	os.MkdirAll(filepath.Join(dir, "memory"), 0o755)
+	os.MkdirAll(filepath.Join(dir, "cpu,cpuacct"), 0o755)
+	os.WriteFile(filepath.Join(dir, "memory", "memory.limit_in_bytes"), []byte("66571993088\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "cpu,cpuacct", "cpu.cfs_quota_us"), []byte("2400000\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "cpu,cpuacct", "cpu.cfs_period_us"), []byte("100000\n"), 0o644)
+	if got := memoryLimit(dir, ""); got != 66571993088 {
+		t.Errorf("v1 memory limit (62 GiB), got %d", got)
+	}
+	if got := cpuLimit(dir); got != 24 {
+		t.Errorf("v1 quota 24 CPUs, got %d", got)
+	}
+	os.WriteFile(filepath.Join(dir, "memory", "memory.limit_in_bytes"), []byte("9223372036854771712\n"), 0o644)
+	meminfo := filepath.Join(dir, "meminfo")
+	os.WriteFile(meminfo, []byte("MemTotal:       131072000 kB\n"), 0o644)
+	if got := memoryLimit(dir, meminfo); got != 131072000*1024 {
+		t.Errorf(`v1 "no limit" is a huge number: the host's RAM then, got %d`, got)
+	}
+}
+
 // the expert pool gets one worker per physical core: hyper-threads added nothing in the RTX 3090 test (results-cores-20261009)
 func TestPhysicalCores(t *testing.T) {
 	var b strings.Builder
