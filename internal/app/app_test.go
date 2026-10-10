@@ -40,7 +40,8 @@ func TestReadsFilesOfVastVersions(t *testing.T) {
 		t.Errorf("a config of Vast asks for the QuickPod key, got %q", hint)
 	}
 	cfg := c.Config()
-	if cfg.GPU != "RTX 4090" || cfg.Grace != 7 || cfg.Race || cfg.LocalPort != 8181 || cfg.GrafanaPort != 3000 || !cfg.Autostart {
+	if cfg.GPU != "RTX 4090" || cfg.Grace != 7 || cfg.Race || cfg.LocalPort != 8181 || cfg.GrafanaPort != 3000 || !cfg.Autostart ||
+		!cfg.FastOnly || cfg.WaitFastMin != 30 {
 		t.Errorf("config: %+v", cfg)
 	}
 	rewritten, _ := os.ReadFile(filepath.Join(dir, "config.json"))
@@ -49,20 +50,40 @@ func TestReadsFilesOfVastVersions(t *testing.T) {
 			t.Errorf("%s must go away on rewrite: %s", gone, rewritten)
 		}
 	}
-	if c.st.ID != "" || len(c.st.BadMachines) != 0 || len(c.st.Pending) != 0 || len(logged) != 1 || !strings.Contains(logged[0], "для Vast") {
-		t.Errorf("the machines and blacklist of Vast mean nothing at QuickPod: state %+v, logged %q", c.st, logged)
+	if c.st.ID != "" || len(c.st.Blocked) != 0 || len(c.st.Pending) != 0 {
+		t.Errorf("the machines and blacklist of Vast mean nothing at QuickPod: state %+v", c.st)
+	}
+	if len(logged) != 2 || !strings.Contains(logged[0], "для Vast") || !strings.Contains(logged[1], "машины Vast 5") {
+		t.Errorf("a machine left at Vast is named, so it is not billed unseen: %q", logged)
 	}
 }
 
 func TestStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	c := New(dir)
-	c.st = State{ID: "3f2a9c10-aaaa", Machine: 303, BadMachines: []int64{7}, Pending: []Rented{{ID: "b1-x", Machine: 8, Created: now()}}}
+	c.st = State{ID: "3f2a9c10-aaaa", Machine: 303, Blocked: []Block{{7, stamp{time.Now().Add(time.Hour).UTC()}, "SSH"}},
+		Pending: []Rented{{ID: "b1-x", Machine: 8, Created: now()}}}
 	c.saveState()
 	again := New(dir)
 	again.loadState()
-	if again.st.ID != "3f2a9c10-aaaa" || again.st.Provider != provider || len(again.st.Pending) != 1 || again.st.Pending[0].ID != "b1-x" || again.st.BadMachines[0] != 7 {
+	if again.st.ID != "3f2a9c10-aaaa" || again.st.Provider != provider || len(again.st.Pending) != 1 || again.st.Pending[0].ID != "b1-x" ||
+		len(again.st.Blocked) != 1 || again.st.Blocked[0].Machine != 7 || again.st.Blocked[0].Reason != "SSH" {
 		t.Errorf("state after a restart: %+v", again.st)
+	}
+}
+
+func TestBlocksExpire(t *testing.T) {
+	c := New(t.TempDir())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.blockLocked(1, false, "SSH")
+	c.blockLocked(2, true, "процессор без AVX2")
+	c.st.Blocked = append(c.st.Blocked, Block{3, stamp{time.Now().Add(-time.Minute).UTC()}, "old"})
+	if got := fmt.Sprint(c.blockedLocked()); got != "[1 2]" {
+		t.Errorf("an expired block is dropped: %s", got)
+	}
+	if len(c.st.Blocked) != 2 || c.st.Blocked[0].Until.Sub(time.Now()) > 4*time.Hour || c.st.Blocked[1].Until.Year() < time.Now().Year()+5 {
+		t.Errorf("a failure blocks for hours, a machine that can never run the engine for good: %+v", c.st.Blocked)
 	}
 }
 
@@ -127,7 +148,7 @@ func TestUsableOffers(t *testing.T) {
 		with(8, func(o *Offer) { o.Dph = 0.10; o.Reliability = 90 }),
 		with(9, func(o *Offer) { o.Dph = 0.10; o.FreeDisk = 100 }),
 		with(10, func(o *Offer) { o.Dph = 0.10; o.Machine = 99 }),
-		with(11, func(o *Offer) { o.Dph = 0.05; o.GPU = "RTX 3090 Ti" }),
+		with(11, func(o *Offer) { o.Dph = 0.12; o.GPU = "RTX 3090 Ti" }), // the same VRAM, faster: taken for an RTX 3090
 		with(12, func(o *Offer) { o.Dph = 0.05; o.GPUs = 2 }),
 		with(13, func(o *Offer) { o.Dph = 0.05; o.Occupied = true }),
 		with(14, func(o *Offer) {
@@ -135,33 +156,44 @@ func TestUsableOffers(t *testing.T) {
 			o.RAM, o.Threads = 125, 24
 			o.CPU = "Intel(R) Xeon(R) CPU E5-2630 v2 @ 2.60GHz"
 		}),
+		with(15, func(o *Offer) { o.Dph = 0.05; o.Lanes = "4" }),
+		with(16, func(o *Offer) { o.Dph = 0.05; o.GPU = "RTX 4090" }),
 	}, "RTX 3090", []int64{99})
 	var got []int64
 	for _, o := range keep {
 		got = append(got, o.ID)
 	}
-	if fmt.Sprint(got) != "[2 4 3 1]" {
+	if fmt.Sprint(got) != "[2 11 4 3 1]" {
 		t.Errorf("the fast configuration first, then the cheapest, then more cores: %v", got)
 	}
-	if len(dropped) != 7 || !strings.Contains(strings.Join(dropped, "|"), "без AVX2") || !strings.Contains(strings.Join(dropped, "|"), "мало RAM") || !strings.Contains(strings.Join(dropped, "|"), "чёрном списке") {
-		t.Errorf("dropped: %v", dropped)
+	all := strings.Join(dropped, "|")
+	for _, why := range []string{"без AVX2", "мало RAM", "мало ядер", "медленная сеть", "надёжность", "мало диска", "чёрном списке", "PCIe x4"} {
+		if !strings.Contains(all, why) {
+			t.Errorf("no offer dropped for %q: %v", why, dropped)
+		}
+	}
+	if !(Offer{RAM: 125, Threads: 24, PCIe: "4.0", Lanes: "x16"}).fast() || (Offer{RAM: 125, Threads: 24, PCIe: "3", Lanes: "16"}).fast() {
+		t.Error(`"4.0" and "x16" are PCIe 4.0 x16; PCIe 3 is not the fast configuration`)
 	}
 }
 
-// the CPU names QuickPod listed on 2026-10-11, and older ones a host may have
-func TestNoAVX2(t *testing.T) {
+// the CPU names QuickPod listed on 2026-10-11, and the spellings other hosts use
+func TestLacksAVX2(t *testing.T) {
 	for cpu, old := range map[string]bool{
 		"Intel(R) Xeon(R) CPU E5-2630 v2 @ 2.60GHz": true, "Intel(R) Xeon(R) CPU E5-2670 v2 @ 2.50GHz": true,
-		"Intel(R) Xeon(R) CPU E5-2670 0 @ 2.60GHz": true, "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz": true,
-		"Intel(R) Xeon(R) CPU X5670 @ 2.93GHz": true, "AMD FX(tm)-8350 Eight-Core Processor": true,
-		"Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz": false, "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz": false,
-		"Intel(R) Xeon(R) CPU E5-2697A v4 @ 2.60GHz": false, "AMD Ryzen 9 5900X 12-Core Processor": false,
-		"AMD Ryzen 9 5950X 16-Core Processor": false, "Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz": false,
-		"Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz": false, "Intel(R) Xeon(R) W-2223 CPU @ 3.60GHz": false,
-		"AMD EPYC 9B14 96-Core Processor": false, "11th Gen Intel(R) Core(TM) i7-11700 @ 2.50GHz": false,
-		"AMD Ryzen 7 2700 Eight-Core Processor": false, "Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz": false,
+		"Intel(R) Xeon(R) CPU E5-2670 0 @ 2.60GHz": true, "Intel(R) Xeon(R) CPU E5-2680 V2 @ 2.80GHz": true,
+		"Intel Xeon E5-2630v2": true, "Intel(R) Xeon(R) CPU E5-2697 v2 2.70GHz": true, "Intel Xeon E5-2630 v2 (12) @ 2.6GHz": true,
+		"Intel(R) Xeon(R) CPU E7- 4870 @ 2.40GHz": true, "Intel(R) Xeon(R) CPU E3-1230 V2 @ 3.30GHz": true, "Intel(R) Xeon(R) CPU E3-1230 @ 3.2GHz": true,
+		"Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz": true, "Intel(R) Core(TM) i7-4930K CPU @ 3.40GHz": true, "Intel(R) Pentium(R) Gold G5400": true,
+		"Intel(R) Xeon(R) CPU X5670 @ 2.93GHz": true, "AMD FX(tm)-8350 Eight-Core Processor": true, "AMD Phenom(tm) II X6 1090T": true,
+		"Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz": false, "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz": false, "Intel Xeon E5-2697v4": false,
+		"Intel(R) Xeon(R) CPU E5-2697A v4 @ 2.60GHz": false, "Intel(R) Xeon(R) CPU E3-1230 v3 @ 3.30GHz": false,
+		"AMD Ryzen 9 5900X 12-Core Processor": false, "AMD Ryzen 9 5950X 16-Core Processor": false, "AMD EPYC 9B14 96-Core Processor": false,
+		"Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz": false, "Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz": false, "Intel(R) Core(TM) i7-4790K CPU @ 4.00GHz": false,
+		"Intel(R) Xeon(R) W-2223 CPU @ 3.60GHz": false, "Intel(R) Xeon(R) Gold 6240R CPU @ 2.40GHz": false, "11th Gen Intel(R) Core(TM) i7-11700 @ 2.50GHz": false,
+		"AMD Ryzen 7 2700 Eight-Core Processor": false, "Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz": false, "13th Gen Intel(R) Core(TM) i9-13900K": false,
 	} {
-		if noAVX2.MatchString(cpu) != old {
+		if lacksAVX2(cpu) != old {
 			t.Errorf("%q: without AVX2 = %v, want %v", cpu, !old, old)
 		}
 	}
@@ -209,22 +241,39 @@ func TestQuickPodRetriesOnlyServerErrors(t *testing.T) {
 	})
 	defer srv.Close()
 	if credit, err := q.Credit(context.Background()); err != nil || credit != 10 || calls != 3 {
-		t.Errorf("credit %v err %v calls %d", credit, err, calls)
+		t.Errorf("a GET is retried: credit %v err %v calls %d", credit, err, calls)
 	}
 
-	calls = 0
+	creates := 0
 	q, srv2 := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		http.Error(w, `{"error":"offer is busy"}`, http.StatusNotAcceptable)
+		if r.URL.Path == "/update/api/createpod" {
+			creates++
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		io.WriteString(w, `[]`)
 	})
 	defer srv2.Close()
-	if _, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); err == nil || !strings.Contains(err.Error(), "HTTP 406") || calls != 1 {
-		t.Errorf("a 4xx answer is final: err %v calls %d", err, calls)
+	if _, err := q.Rent(context.Background(), 7, "tpl", "cHVi", "vast-llm-1"); err == nil || creates != 1 {
+		t.Errorf("a createpod is never sent twice (a second machine would run unseen): err %v, sent %d", err, creates)
+	}
+
+	q, srv3 := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/update/api/createpod" {
+			http.Error(w, `{"error":"offer is busy"}`, http.StatusNotAcceptable)
+			return
+		}
+		io.WriteString(w, `[]`)
+	})
+	defer srv3.Close()
+	var refused *HTTPError
+	if _, err := q.Rent(context.Background(), 7, "tpl", "cHVi", "vast-llm-1"); !errors.As(err, &refused) || refused.Status != 406 {
+		t.Errorf("a refusal comes back as it is: %v", err)
 	}
 
 	calls = 0
-	q, srv3 := testQuickPod(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusInternalServerError) })
-	defer srv3.Close()
+	q, srv4 := testQuickPod(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusInternalServerError) })
+	defer srv4.Close()
 	if _, err := q.Pods(context.Background()); err == nil || calls != 4 {
 		t.Errorf("4 attempts, then the error: err %v calls %d", err, calls)
 	}
@@ -235,31 +284,35 @@ func TestRentRequest(t *testing.T) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
 		if r.Method != http.MethodPost || r.URL.Path != "/update/api/createpod" || body["offers_id"] != float64(7) || body["template_uuid"] != "tpl" ||
-			body["disk_size"] != strconv.Itoa(diskGB) || body["docker_options"] != "-p 22:22 -e PUBKEY_B64=cHVi" || body["altname"] != Label {
+			body["disk_size"] != strconv.Itoa(diskGB) || body["docker_options"] != "-p 22:22 -e PUBKEY_B64=cHVi" || body["altname"] != "vast-llm-ab12" {
 			t.Errorf("%s %s %v", r.Method, r.URL.Path, body)
 		}
 		io.WriteString(w, `{"status":"success","pod_uuid":"9b1c-42"}`)
 	})
 	defer srv.Close()
-	if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); id != "9b1c-42" || err != nil {
+	if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi", "vast-llm-ab12"); id != "9b1c-42" || err != nil {
 		t.Errorf("id %q err %v", id, err)
 	}
 
-	// an answer without the UUID: the pod is found in the list by its label and offer
-	q, srv2 := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/update/api/createpod":
-			io.WriteString(w, `{"status":"success","message":"Pod created"}`)
-		case "/update/api/gpu_pods":
-			io.WriteString(w, `[{"pod_uuid":"other","altname":"vast-llm","offers_id":8},{"pod_uuid":"mine","altname":"vast-llm","offers_id":7}]`)
+	// the answer was lost (a timeout, a 502) but QuickPod created the machine: it is found by this rent's own name
+	for _, answer := range []int{http.StatusOK, http.StatusBadGateway} {
+		q, srv2 := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/update/api/createpod":
+				w.WriteHeader(answer)
+				io.WriteString(w, `{"status":"success","message":"Pod created"}`)
+			case "/update/api/gpu_pods":
+				io.WriteString(w, `[{"Names":"other","altname":"vast-llm-zz99","offers_id":7},{"Names":"mine","altname":"vast-llm-ab12","offers_id":7}]`)
+			}
+		})
+		if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi", "vast-llm-ab12"); id != "mine" || err != nil {
+			t.Errorf("HTTP %d: found by its name: id %q err %v", answer, id, err)
 		}
-	})
-	defer srv2.Close()
-	if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); id != "mine" || err != nil {
-		t.Errorf("found by label and offer: id %q err %v", id, err)
+		srv2.Close()
 	}
 }
 
+// gpu_pods as the real API answers it (2026-10-10): no pod_uuid, the container's name is the UUID
 func TestOffersAndPodsParse(t *testing.T) {
 	q, srv := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -268,9 +321,11 @@ func TestOffersAndPodsParse(t *testing.T) {
 				"gpu_pcie":"4","gpu_lanes":"16","num_gpus":1,"occupied":false,"_machines":{"cpu_name":"AMD Ryzen 9 5900X 12-Core Processor ",
 				"geolocation":"US","inet_down":909.49,"avail_disk_space":3288,"reliability":97.6,"verification":true}}]`)
 		case "/update/api/gpu_pods":
-			io.WriteString(w, `[{"pod_uuid":"aa-1","altname":"vast-llm","State":"running","public_ipaddr":"1.2.3.4","machines_id":303,
-				"hourly_cost":"0.2","port_mappings":"{\"22/tcp\":[{\"HostPort\":\"40022\"}]}","_offers":{"gpu_type":"NVIDIA GeForce RTX 3090"},
-				"_machines":{"geolocation":"US"}},{"pod_uuid":"bb-2","altname":"vast-llm","destroyed":true}]`)
+			io.WriteString(w, `[{"id":3501268,"Names":"aa-1","altname":"vast-llm-1f2e","State":"running","public_ipaddr":"1.2.3.4","machines_id":303,
+				"offers_id":7151,"hourly_cost":"0.2","Ports":"0.0.0.0:40022->22/tcp, [::]:40022->22/tcp",
+				"port_mappings":"22 -> <a target=\"_new\" href=\"http://1.2.3.4:40022\">1.2.3.4:40022</a> |","_offers":{"gpu_type":"NVIDIA GeForce RTX 3090"},
+				"_machines":{"geolocation":"US"}},{"Names":["/bb-2"],"altname":"vast-llm","destroyed":false,"State":"exited","intended_state":"stopped",
+				"port_mappings":"22 -> <a href=\"http://5.6.7.8:41022\">5.6.7.8:41022</a> |"},{"Names":"cc-3","altname":"vast-llm","destroyed":true}]`)
 		}
 	})
 	defer srv.Close()
@@ -282,11 +337,14 @@ func TestOffersAndPodsParse(t *testing.T) {
 		t.Errorf("offer %+v", o)
 	}
 	pods, err := q.Pods(context.Background())
-	if err != nil || len(pods) != 1 {
+	if err != nil || len(pods) != 2 {
 		t.Fatalf("a destroyed pod is not listed: %v %v", pods, err)
 	}
-	if p := pods[0]; p.UUID != "aa-1" || p.Name != Label || !p.running() || p.sshPort() != 40022 || p.Dph != 0.2 || p.GPU != "RTX 3090" || p.Machine != 303 {
+	if p := pods[0]; p.UUID != "aa-1" || !p.ours() || !p.running() || p.sshPort() != 40022 || p.Dph != 0.2 || p.GPU != "RTX 3090" || p.Machine != 303 || p.Offer != 7151 {
 		t.Errorf("pod %+v", p)
+	}
+	if p := pods[1]; p.UUID != "bb-2" || !p.ours() || !p.stopped() || p.IP != "5.6.7.8" || p.sshPort() != 41022 {
+		t.Errorf("a list of names, the IP from port_mappings, a pod stopped at zero credit: %+v", p)
 	}
 }
 
@@ -462,20 +520,23 @@ func TestTunnel(t *testing.T) {
 
 // ---------- Startup, Up and Down against a fake QuickPod and the in-process sshd ----------
 
+// fakeQuickPod answers like the real API: gpu_pods name a pod by "Names" (no pod_uuid), createpod returns the UUID.
 type fakeQuickPod struct {
-	mu      sync.Mutex
-	sshPort string
-	next    int
-	pods    map[string]map[string]any
-	rented  []map[string]any
-	deleted []string
+	mu        sync.Mutex
+	sshPort   string
+	next      int
+	pods      map[string]map[string]any
+	rented    []map[string]any
+	deleted   []string
+	slowOnly  int // the first this many /rentable answers list no fast machine
+	rentables int
 }
 
 func (f *fakeQuickPod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	machine := func(cpu string, inet float64) string {
-		return fmt.Sprintf(`{"cpu_name":%q,"geolocation":"US","inet_down":%v,"avail_disk_space":900,"reliability":97,"verification":true}`, cpu, inet)
+	machine := func(cpu string) string {
+		return fmt.Sprintf(`{"cpu_name":%q,"geolocation":"US","inet_down":900,"avail_disk_space":900,"reliability":97,"verification":true}`, cpu)
 	}
 	switch {
 	case r.URL.Path == "/update/api/me":
@@ -483,18 +544,23 @@ func (f *fakeQuickPod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/rate":
 		io.WriteString(w, `<ValCurs><Valute><CharCode>EUR</CharCode><Value>97,10</Value></Valute><Valute><CharCode>USD</CharCode><Value>83,4839</Value></Valute></ValCurs>`)
 	case r.URL.Path == "/rentable":
-		fmt.Fprintf(w, `[{"id":101,"machines_id":1,"gpu_type":"NVIDIA GeForce RTX 3090","hourly_cost":0.15,"memory":62,"cpus":16,"gpu_pcie":"3","gpu_lanes":"16","num_gpus":1,"_machines":%s},
+		f.rentables++
+		slow := fmt.Sprintf(`{"id":103,"machines_id":3,"gpu_type":"NVIDIA GeForce RTX 3090","hourly_cost":0.10,"memory":62,"cpus":16,"gpu_pcie":"3","gpu_lanes":"16","num_gpus":1,"_machines":%s}`, machine("i7-7700"))
+		if f.rentables <= f.slowOnly {
+			fmt.Fprintf(w, `[%s]`, slow)
+			return
+		}
+		fmt.Fprintf(w, `[{"id":101,"machines_id":1,"gpu_type":"NVIDIA GeForce RTX 3090","hourly_cost":0.15,"memory":125,"cpus":24,"gpu_pcie":"4","gpu_lanes":"16","num_gpus":1,"_machines":%s},
 			{"id":102,"machines_id":2,"gpu_type":"NVIDIA GeForce RTX 3090","hourly_cost":0.18,"memory":125,"cpus":24,"gpu_pcie":"4","gpu_lanes":"16","num_gpus":1,"_machines":%s},
-			{"id":103,"machines_id":3,"gpu_type":"NVIDIA GeForce RTX 4090","hourly_cost":0.10,"memory":125,"cpus":24,"gpu_pcie":"4","gpu_lanes":"16","num_gpus":1,"_machines":%s}]`,
-			machine("i7-7700", 900), machine("AMD Ryzen 9 5900X", 909), machine("x", 900))
+			%s]`, machine("AMD Ryzen 9 5950X"), machine("AMD Ryzen 9 5900X"), slow)
 	case r.URL.Path == "/update/api/createpod":
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
 		f.rented = append(f.rented, body)
 		f.next++
 		uuid := fmt.Sprintf("pod%d-%d", f.next, int(body["offers_id"].(float64)))
-		f.pods[uuid] = map[string]any{"pod_uuid": uuid, "altname": body["altname"], "State": "running", "public_ipaddr": "127.0.0.1",
-			"machines_id": body["offers_id"].(float64) - 100, "hourly_cost": 0.18, "Ports": "0.0.0.0:" + f.sshPort + "->22/tcp",
+		f.pods[uuid] = map[string]any{"Names": uuid, "altname": body["altname"], "State": "running", "public_ipaddr": "127.0.0.1",
+			"machines_id": body["offers_id"].(float64) - 100, "offers_id": body["offers_id"], "hourly_cost": 0.18, "Ports": "0.0.0.0:" + f.sshPort + "->22/tcp",
 			"_offers": map[string]any{"gpu_type": "NVIDIA GeForce RTX 3090"}, "_machines": map[string]any{"geolocation": "US"}}
 		fmt.Fprintf(w, `{"status":"success","pod_uuid":%q}`, uuid)
 	case r.URL.Path == "/update/api/gpu_pods":
@@ -505,43 +571,62 @@ func (f *fakeQuickPod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(list)
 	case r.URL.Path == "/update/api/destroypod":
 		uuid := r.URL.Query().Get("pod_uuid")
-		delete(f.pods, uuid)
-		f.deleted = append(f.deleted, uuid)
-		io.WriteString(w, `{"message":"ok"}`)
+		if _, ok := f.pods[uuid]; ok {
+			delete(f.pods, uuid)
+			f.deleted = append(f.deleted, uuid)
+		}
+		io.WriteString(w, `{"message":"Pod destroyed"}`)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func TestUpAndDown(t *testing.T) {
+// testRig: a config, a fake QuickPod, an sshd whose `cat /opt/llm/state` answers come from states (the last repeats).
+type testRig struct {
+	dir     string
+	apiPort int
+	fake    *fakeQuickPod
+	srv     *httptest.Server
+	pub     string
+}
+
+func newRig(t *testing.T, config string, states ...string) *testRig {
 	dir := t.TempDir()
 	apiPort, grafanaPort := freePort(t), freePort(t)
-	os.WriteFile(filepath.Join(dir, "config.json"), fmt.Appendf(nil, `{"quickpod_api_key":"k","quickpod_template_uuid":"tpl-1","race_two_hosts":true,
-		"cheapest_grace_seconds":1,"local_port":%d,"grafana_port":%d,"autostart":false}`, apiPort, grafanaPort), 0o600)
+	os.WriteFile(filepath.Join(dir, "config.json"), fmt.Appendf(nil, `{"quickpod_api_key":"k","quickpod_template_uuid":"tpl-1",%s
+		"cheapest_grace_seconds":1,"local_port":%d,"grafana_port":%d,"autostart":false}`, config, apiPort, grafanaPort), 0o600)
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "pong") }))
-	defer engine.Close()
+	t.Cleanup(engine.Close)
 	signer, pub, _ := loadKey(filepath.Join(dir, "ssh_key.pem"))
-	var stateMu sync.Mutex
-	remoteState := "downloading 10 из 78 ГБ"
+	var mu sync.Mutex
 	addr := sshd(t, signer.PublicKey(), strings.TrimPrefix(engine.URL, "http://"), func(cmd string) string {
-		stateMu.Lock()
-		defer stateMu.Unlock()
+		mu.Lock()
+		defer mu.Unlock()
 		if strings.HasPrefix(cmd, "cat /opt/llm/state") {
-			defer func() { remoteState = "ready" }()
-			return remoteState + "\n"
+			s := states[0]
+			if len(states) > 1 {
+				states = states[1:]
+			}
+			return s + "\n"
 		}
 		return "RTX 3090, 350.00 W\n"
 	})
 	_, sshPort, _ := net.SplitHostPort(addr)
 	fake := &fakeQuickPod{sshPort: sshPort, pods: map[string]map[string]any{}}
 	srv := httptest.NewServer(fake)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return &testRig{dir, apiPort, fake, srv, pub}
+}
 
-	setup := func(c *Core) {
-		c.qp.Base, c.qp.Pause, c.poll, c.rates = srv.URL, time.Millisecond, 10*time.Millisecond, srv.URL+"/rate"
-	}
-	c := New(dir)
-	setup(c)
+func (rig *testRig) core() *Core {
+	c := New(rig.dir)
+	c.qp.Base, c.qp.Pause, c.poll, c.waitPoll, c.rates = rig.srv.URL, time.Millisecond, 10*time.Millisecond, 10*time.Millisecond, rig.srv.URL+"/rate"
+	return c
+}
+
+func TestUpAndDown(t *testing.T) {
+	rig := newRig(t, `"race_two_hosts":true,`, "downloading 10 из 78 ГБ", "ready")
+	c := rig.core()
 	var phases []string
 	var mu sync.Mutex
 	c.OnChange = func() {
@@ -566,19 +651,21 @@ func TestUpAndDown(t *testing.T) {
 	if v.Phase != "ready" || !v.Tunnel || len(v.Machines) != 1 || !v.Machines[0].Main {
 		t.Fatalf("after Up: %+v", v)
 	}
-	if v.Machines[0].Machine != 2 {
-		t.Errorf("the fast configuration (machine 2) must win inside the grace, got machine %d", v.Machines[0].Machine)
+	if v.Machines[0].Machine != 1 {
+		t.Errorf("the cheaper of the two fast machines (1) must win inside the grace, got machine %d", v.Machines[0].Machine)
 	}
-	fake.mu.Lock()
-	if len(fake.rented) != 2 || fake.rented[0]["offers_id"] != float64(102) || fake.rented[1]["offers_id"] != float64(101) {
-		t.Errorf("the race rents the 2 best RTX 3090 (fast first), rented %v", fake.rented)
+	rig.fake.mu.Lock()
+	if len(rig.fake.rented) != 2 || rig.fake.rented[0]["offers_id"] != float64(101) || rig.fake.rented[1]["offers_id"] != float64(102) {
+		t.Errorf("the race rents the 2 fast RTX 3090 (the slow one never), rented %v", rig.fake.rented)
 	}
-	wantOpts := "-p 22:22 -e PUBKEY_B64=" + base64.StdEncoding.EncodeToString([]byte(pub))
-	if fake.rented[0]["docker_options"] != wantOpts || fake.rented[0]["template_uuid"] != "tpl-1" {
-		t.Errorf("rent body: %v", fake.rented[0])
+	wantOpts := "-p 22:22 -e PUBKEY_B64=" + base64.StdEncoding.EncodeToString([]byte(rig.pub))
+	name, _ := rig.fake.rented[0]["altname"].(string)
+	if rig.fake.rented[0]["docker_options"] != wantOpts || rig.fake.rented[0]["template_uuid"] != "tpl-1" || !strings.HasPrefix(name, Label+"-") ||
+		rig.fake.rented[1]["altname"] == name {
+		t.Errorf("rent body: %v; every rent has its own name", rig.fake.rented)
 	}
-	fake.mu.Unlock()
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", apiPort))
+	rig.fake.mu.Unlock()
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", rig.apiPort))
 	if err != nil {
 		t.Fatalf("the API must answer through the tunnel: %v", err)
 	}
@@ -586,7 +673,7 @@ func TestUpAndDown(t *testing.T) {
 
 	// the race loser is deleted in the background and leaves state.json
 	deadline := time.Now().Add(5 * time.Second)
-	for len(c.View().Machines) != 1 || func() bool { fake.mu.Lock(); defer fake.mu.Unlock(); return len(fake.deleted) != 1 }() {
+	for len(c.View().Machines) != 1 || func() bool { rig.fake.mu.Lock(); defer rig.fake.mu.Unlock(); return len(rig.fake.deleted) != 1 }() {
 		if time.Now().After(deadline) {
 			t.Fatalf("loser not deleted: %+v", c.View().Machines)
 		}
@@ -595,8 +682,7 @@ func TestUpAndDown(t *testing.T) {
 
 	// a restart of the program finds the machine in state.json and reconnects
 	c.closeTunnel()
-	again := New(dir)
-	setup(again)
+	again := rig.core()
 	again.Startup()
 	if v := again.View(); v.Phase != "ready" || !v.Tunnel || v.Machines[0].ID != c.View().Machines[0].ID {
 		t.Fatalf("after restart: %+v", v)
@@ -606,11 +692,11 @@ func TestUpAndDown(t *testing.T) {
 	if v := again.View(); v.Phase != "off" || len(v.Machines) != 0 || v.Tunnel {
 		t.Fatalf("after Down: %+v", v)
 	}
-	fake.mu.Lock()
-	if len(fake.pods) != 0 {
-		t.Errorf("machines left at QuickPod: %v", fake.pods)
+	rig.fake.mu.Lock()
+	if len(rig.fake.pods) != 0 {
+		t.Errorf("machines left at QuickPod: %v", rig.fake.pods)
 	}
-	fake.mu.Unlock()
+	rig.fake.mu.Unlock()
 	c.tasks.Wait()
 	again.tasks.Wait()
 	mu.Lock()
@@ -618,4 +704,74 @@ func TestUpAndDown(t *testing.T) {
 		t.Errorf("phases of the first Up: %s", got)
 	}
 	mu.Unlock()
+}
+
+// llmd says the machine cannot run the engine: Up deletes it at once (it is billed), never rents it again, takes the next
+func TestFailedMachineIsReplaced(t *testing.T) {
+	rig := newRig(t, "", "failed процессор без AVX2", "ready")
+	c := rig.core()
+	c.Startup()
+	c.Up()
+	v := c.View()
+	if v.Phase != "ready" || len(v.Machines) != 1 || v.Machines[0].Machine != 2 {
+		t.Fatalf("the next fast machine (2) must be up: %+v", v)
+	}
+	rig.fake.mu.Lock()
+	if len(rig.fake.deleted) != 1 || !strings.HasSuffix(rig.fake.deleted[0], "-101") || len(rig.fake.pods) != 1 {
+		t.Errorf("the failed machine must be deleted at once: deleted %v, left %v", rig.fake.deleted, rig.fake.pods)
+	}
+	rig.fake.mu.Unlock()
+	c.mu.Lock()
+	if len(c.st.Blocked) != 1 || c.st.Blocked[0].Machine != 1 || c.st.Blocked[0].Until.Year() < time.Now().Year()+5 {
+		t.Errorf("a machine without AVX2 is never rented again: %+v", c.st.Blocked)
+	}
+	c.mu.Unlock()
+	c.Down("тест")
+	c.tasks.Wait()
+}
+
+// a machine of this program that state.json does not know (a rent whose answer was lost) is deleted by Down too
+func TestDownDeletesUnseenMachines(t *testing.T) {
+	rig := newRig(t, "", "ready")
+	rig.fake.pods["lost-1"] = map[string]any{"Names": "lost-1", "altname": Label + "-dead", "State": "running"}
+	rig.fake.pods["someone-else"] = map[string]any{"Names": "someone-else", "altname": "my-notebook", "State": "running"}
+	c := rig.core()
+	c.loadConfig()
+	c.Down("тест")
+	rig.fake.mu.Lock()
+	defer rig.fake.mu.Unlock()
+	if _, ok := rig.fake.pods["lost-1"]; ok || len(rig.fake.pods) != 1 || c.View().Phase != "off" {
+		t.Errorf("the unseen machine must go, another program's must stay: %v, phase %s", rig.fake.pods, c.View().Phase)
+	}
+}
+
+// fast_only: no fast machine yet - Up waits (renting nothing) and takes the fast one when it appears; past
+// wait_fast_minutes it stops and says what is free
+func TestFastOnlyWaits(t *testing.T) {
+	rig := newRig(t, `"wait_fast_minutes":1,`, "ready")
+	rig.fake.slowOnly = 3
+	c := rig.core()
+	c.loadConfig()
+	offers, err := c.pickOffers(context.Background(), c.Config())
+	if err != nil || len(offers) != 2 || !offers[0].fast() || rig.fake.rentables != 4 {
+		t.Errorf("waited for the fast machines: %v, err %v, looked %d times", offers, err, rig.fake.rentables)
+	}
+	if c.View().Phase != "waiting" {
+		t.Errorf("the window shows the wait: %s", c.View().Phase)
+	}
+	rig.fake.mu.Lock()
+	rig.fake.rentables, rig.fake.slowOnly = 0, 100
+	rig.fake.mu.Unlock()
+	cfg := c.Config()
+	cfg.WaitFastMin = 0
+	if _, err := c.pickOffers(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "fast_only") || !strings.Contains(err.Error(), "i7-7700") {
+		t.Errorf("past the wait: what is free and how to take it, got %v", err)
+	}
+	cfg.FastOnly = false
+	if offers, err := c.pickOffers(context.Background(), cfg); err != nil || len(offers) != 1 || offers[0].fast() {
+		t.Errorf("without fast_only the slow machine is taken: %v %v", offers, err)
+	}
+	if len(rig.fake.rented) != 0 {
+		t.Error("waiting rents nothing")
+	}
 }

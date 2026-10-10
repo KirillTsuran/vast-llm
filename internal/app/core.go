@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,14 +28,15 @@ type Core struct {
 	OnChange func()       // something shown in the window changed
 	OnLog    func(string) // a line for the window's journal
 
-	qp     *QuickPod
-	debug  atomic.Bool
-	poll   time.Duration // pause between polls of QuickPod and of the machine
-	rates  string        // where the dollar rate comes from
-	tasks  sync.WaitGroup
-	busy   chan struct{}
-	signer ssh.Signer
-	pub    string
+	qp       *QuickPod
+	debug    atomic.Bool
+	poll     time.Duration // pause between polls of QuickPod and of the machine
+	waitPoll time.Duration // pause between looks for a fast machine while Up waits for one
+	rates    string        // where the dollar rate comes from
+	tasks    sync.WaitGroup
+	busy     chan struct{}
+	signer   ssh.Signer
+	pub      string
 
 	mu              sync.Mutex // guards everything below
 	cfg             Config
@@ -44,11 +48,12 @@ type Core struct {
 	lastCredit      time.Time
 	lastStats       time.Time
 	lastClean       time.Time
+	lastReconcile   time.Time
 	lowCreditWarned bool
 }
 
 func New(dir string) *Core {
-	c := &Core{Dir: dir, cfg: defaultConfig(), phase: "off", poll: 5 * time.Second, busy: make(chan struct{}, 1), lastStats: time.Now(),
+	c := &Core{Dir: dir, cfg: defaultConfig(), phase: "off", poll: 5 * time.Second, waitPoll: time.Minute, busy: make(chan struct{}, 1), lastStats: time.Now(),
 		rates: "https://www.cbr.ru/scripts/XML_daily.asp"}
 	c.qp = newQuickPod(func() string { return strings.TrimSpace(c.Config().Key) }, c.debugf)
 	return c
@@ -321,16 +326,125 @@ func (c *Core) up(ctx context.Context) error {
 			return fmt.Errorf("машина %s не отвечает по SSH (%w). Она не удалена: Up — повторить, Down — удалить", short(id), err)
 		}
 	}
-	for round := 1; id == "" && round <= 3; round++ {
-		var err error
-		if id, err = c.rentAndRace(ctx, start); err != nil {
+	for round := 1; round <= 3; round++ {
+		if id == "" {
+			var err error
+			if id, err = c.rentAndRace(ctx, start); err != nil {
+				return err
+			}
+			if id == "" {
+				continue
+			}
+		}
+		err := c.waitReady(ctx, id, start)
+		var bad *machineFailed
+		if !errors.As(err, &bad) {
 			return err
 		}
+		// it cannot serve the model and is billed while it stays: delete it at once and take the next machine
+		c.logf("машина %s не подошла: %s — удаляю её и беру следующую", short(id), bad.reason)
+		c.closeTunnel()
+		c.mu.Lock()
+		c.blockLocked(bad.machine, bad.permanent, bad.reason)
+		c.mu.Unlock()
+		if derr := c.destroy(id); derr != nil {
+			return fmt.Errorf("машина %s не подошла (%s), и удаление не подтвердилось: %w. Нажмите Down", short(id), bad.reason, derr)
+		}
+		c.mu.Lock()
+		c.st.ID, c.st.HostKey = "", ""
+		c.saveState()
+		c.mu.Unlock()
+		id = ""
 	}
-	if id == "" {
-		return errors.New("не удалось поднять машину за 3 попытки")
+	return errors.New("не удалось поднять машину за 3 попытки")
+}
+
+// machineFailed: the machine itself cannot serve (llmd said so, or it never got ready); Up deletes it and goes on.
+type machineFailed struct {
+	machine   int64
+	reason    string
+	permanent bool // it can never run the engine (no AVX2, too little memory): never rent it again
+}
+
+func (e *machineFailed) Error() string { return e.reason }
+
+// blockLocked keeps a machine out of the offers: for good when it can never run the engine, otherwise for 3 hours.
+// Callers hold c.mu.
+func (c *Core) blockLocked(machine int64, permanent bool, reason string) {
+	until := time.Now().Add(3 * time.Hour)
+	if permanent {
+		until = time.Now().AddDate(10, 0, 0)
 	}
-	return c.waitReady(ctx, id, start)
+	c.st.Blocked = append(c.st.Blocked, Block{machine, stamp{until.UTC()}, reason})
+	c.saveState()
+}
+
+// blockedLocked drops the expired blocks and returns the machines still blocked. Callers hold c.mu.
+func (c *Core) blockedLocked() []int64 {
+	var keep []Block
+	var machines []int64
+	for _, b := range c.st.Blocked {
+		if time.Now().Before(b.Until.Time) {
+			keep = append(keep, b)
+			machines = append(machines, b.Machine)
+		}
+	}
+	c.st.Blocked = keep
+	return machines
+}
+
+// pickOffers returns the machines to rent, best first. With fast_only only the fast configuration counts: while there
+// is none it waits, polling every c.waitPoll, up to wait_fast_minutes (Down cancels the wait).
+func (c *Core) pickOffers(ctx context.Context, cfg Config) ([]Offer, error) {
+	deadline := time.Now().Add(time.Duration(cfg.WaitFastMin) * time.Minute)
+	for {
+		c.mu.Lock()
+		bad := c.blockedLocked()
+		c.mu.Unlock()
+		all, err := c.qp.Offers(ctx)
+		if err != nil {
+			return nil, err
+		}
+		offers, dropped := usable(all, cfg.GPU, bad)
+		for _, d := range dropped {
+			c.debugf("предложение %s", d)
+		}
+		var fast []Offer
+		for _, o := range offers {
+			if o.fast() {
+				fast = append(fast, o)
+			}
+		}
+		switch {
+		case len(fast) > 0:
+			return fast, nil
+		case !cfg.FastOnly && len(offers) > 0:
+			return offers, nil
+		case !cfg.FastOnly:
+			return nil, fmt.Errorf("в QuickPod сейчас нет свободных %s, на которых работает модель (≥ %d ГБ RAM, ≥ %d потоков, AVX2, сеть ≥ %d Мбит/с) — повторите Up позже или выберите другую видеокарту",
+				cfg.GPU, minRAMGB, minThreads, minInet)
+		}
+		other := "других подходящих тоже нет"
+		if len(offers) > 0 {
+			other = "свободна только " + describe(offers[0])
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("быстрой %s (≥ %d ГБ RAM, PCIe 4.0 x16, ≥ %d потоков) нет %d мин; %s. Чтобы брать и такие, поставьте \"fast_only\": false в config.json",
+				cfg.GPU, fastRAMGB, fastThreads, cfg.WaitFastMin, other)
+		}
+		c.set("waiting", fmt.Sprintf("жду быструю %s (≥ %d ГБ RAM, PCIe 4.0 x16), проверяю раз в минуту до %s; %s. Машина не арендована, денег это не стоит; Down — отмена",
+			cfg.GPU, fastRAMGB, deadline.Format("15:04"), other))
+		if err := c.sleep(ctx, c.waitPoll); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// rentName is the altname of one rent: Label plus a nonce, so a rent whose answer was lost is found again by it.
+func rentName() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return Label + "-" + hex.EncodeToString(b)
 }
 
 // rentAndRace rents the best machine (two with the race; or takes the ones an interrupted Up left in state.json),
@@ -340,42 +454,32 @@ func (c *Core) rentAndRace(ctx context.Context, start time.Time) (string, error)
 	cfg := c.Config()
 	c.mu.Lock()
 	cands := append([]Rented(nil), c.st.Pending...)
-	bad := append([]int64(nil), c.st.BadMachines...)
 	c.mu.Unlock()
 	if len(cands) > 0 {
 		c.logf("продолжаю прерванный запуск: машины %s", ids(cands))
 	} else {
-		all, err := c.qp.Offers(ctx)
+		offers, err := c.pickOffers(ctx, cfg)
 		if err != nil {
 			return "", err
 		}
-		offers, dropped := usable(all, cfg.GPU, bad)
-		for _, d := range dropped {
-			c.debugf("предложение %s", d)
-		}
-		if len(offers) == 0 {
-			return "", fmt.Errorf("в QuickPod сейчас нет свободных %s с ≥ %d ГБ RAM и ≥ %d потоками — выберите другую видеокарту или повторите Up", cfg.GPU, minRAMGB, minThreads)
-		}
 		want := 1
-		if cfg.Race {
+		if cfg.Race && len(offers) > 1 && offers[1].fast() == offers[0].fast() { // never race the best against a slower one
 			want = 2
 			c.set("renting", fmt.Sprintf("арендую 2 лучшие %s, оставлю первую поднявшуюся (лучшей даю %d с форы)", cfg.GPU, cfg.Grace))
 		} else {
 			c.set("renting", "арендую "+describe(offers[0]))
 		}
 		for _, o := range offers[:min(want, len(offers))] {
-			id, err := c.qp.Rent(ctx, o.ID, cfg.Template, base64.StdEncoding.EncodeToString([]byte(c.pub)))
+			id, err := c.qp.Rent(ctx, o.ID, cfg.Template, base64.StdEncoding.EncodeToString([]byte(c.pub)), rentName())
 			c.mu.Lock()
-			if err != nil {
-				c.st.BadMachines = append(c.st.BadMachines, o.Machine)
-			} else {
+			if err == nil {
 				r := Rented{id, o.Machine, o.GPU, o.Geo, o.Dph, now()}
 				c.st.Pending = append(c.st.Pending, r)
 				cands = append(cands, r)
+				c.saveState()
 			}
-			c.saveState()
 			c.mu.Unlock()
-			if err != nil {
+			if err != nil { // a refusal (the offer was just taken) or a lost answer: no fault of the machine, nothing blocked
 				c.logf("аренда не удалась (%s): %v", o.Geo, err)
 				continue
 			}
@@ -416,7 +520,7 @@ func (c *Core) rentAndRace(ctx context.Context, start time.Time) (string, error)
 		}
 		c.mu.Lock()
 		if d.err != nil && !errors.Is(d.err, context.Canceled) {
-			c.st.BadMachines = append(c.st.BadMachines, d.r.Machine)
+			c.blockLocked(d.r.Machine, false, "SSH: "+d.err.Error())
 			c.logLocked(fmt.Sprintf("машина %s не подошла: %v", short(d.r.ID), d.err))
 		}
 		c.mu.Unlock()
@@ -518,10 +622,11 @@ func (c *Core) waitReady(ctx context.Context, id string, start time.Time) error 
 			return nil
 		case "failed":
 			c.mu.Lock()
-			c.st.BadMachines = append(c.st.BadMachines, c.st.Machine)
-			c.saveState()
+			machine := c.st.Machine
 			c.mu.Unlock()
-			return fmt.Errorf("машина %s не подошла: %s. Нажмите Down, затем Up — возьму другую", short(id), detail)
+			// llmd's own checks of the hardware: such a machine can never run the engine
+			never := strings.Contains(detail, "AVX2") || strings.Contains(detail, "мало памяти")
+			return &machineFailed{machine, detail, never}
 		case "downloading":
 			c.set("downloading", "качаю модель: "+detail)
 		case "preparing":
@@ -535,25 +640,42 @@ func (c *Core) waitReady(ctx context.Context, id string, start time.Time) error 
 			return err
 		}
 	}
-	return errors.New("модель не загрузилась за 60 минут")
+	c.mu.Lock()
+	machine := c.st.Machine
+	c.mu.Unlock()
+	return &machineFailed{machine, "модель не загрузилась за 60 минут", false}
 }
 
 // ---------- Down ----------
 
-// destroy deletes a machine and waits until QuickPod no longer lists it.
+// destroy deletes a machine and waits until QuickPod no longer lists it, sending the delete again every 6 polls.
 func (c *Core) destroy(id string) error {
 	ctx := context.Background()
-	if err := c.qp.Destroy(ctx, id); err != nil {
-		c.logf("delete %s: %v", short(id), err)
-	}
-	for range 40 {
+	for try := range 40 {
+		if try%6 == 0 {
+			if err := c.qp.Destroy(ctx, id); err != nil {
+				c.logf("delete %s: %v", short(id), err)
+			}
+		}
+		time.Sleep(c.poll)
 		if pod, err := c.qp.Pod(ctx, id); err == nil && pod == nil {
 			c.logf("машина %s удалена (подтверждено API)", short(id))
 			return nil
 		}
-		time.Sleep(c.poll)
 	}
 	return fmt.Errorf("удаление %s не подтверждено, проверьте console.quickpod.io", short(id))
+}
+
+// ourPods lists every machine of this program QuickPod still has, known to state.json or not.
+func (c *Core) ourPods() ([]Pod, error) {
+	pods, err := c.qp.Pods(context.Background())
+	var ours []Pod
+	for _, p := range pods {
+		if p.ours() && p.UUID != "" {
+			ours = append(ours, p)
+		}
+	}
+	return ours, err
 }
 
 // destroyPending deletes an extra machine of an Up (race loser) and drops it from state.json once QuickPod confirms.
@@ -587,22 +709,41 @@ func (c *Core) Down(reason string) {
 		all = append(all, r.ID)
 	}
 	c.mu.Unlock()
+	// and every machine of this program QuickPod still lists: a rent whose answer was lost, an adopted one
+	ours, err := c.ourPods()
+	if err != nil {
+		c.logf("список машин QuickPod не получен (%v) — удаляю известные", err)
+	}
+	for _, p := range ours {
+		if !slices.Contains(all, p.UUID) {
+			c.logf("⚠ у QuickPod есть машина %s, которой нет в state.json — удаляю и её", short(p.UUID))
+			all = append(all, p.UUID)
+		}
+	}
 	if len(all) == 0 {
 		c.set("off", "машин нет")
 		return
 	}
 	c.set("stopping", fmt.Sprintf("удаляю %s (%s)", shorts(all), reason))
 	c.closeTunnel()
-	for _, id := range all {
+	var left []string
+	for _, id := range all { // every machine is tried even when one of them fails
 		if err := c.destroy(id); err != nil {
-			c.set("error", err.Error())
-			return
+			c.Log(err.Error())
+			left = append(left, id)
 		}
 	}
 	c.mu.Lock()
-	c.st = State{BadMachines: c.st.BadMachines}
+	c.st = State{Blocked: c.st.Blocked}
+	for _, id := range left { // what was not confirmed stays known, so the next Down (or a restart) tries it again
+		c.st.Pending = append(c.st.Pending, Rented{ID: id, Created: now()})
+	}
 	c.saveState()
 	c.mu.Unlock()
+	if len(left) > 0 {
+		c.set("error", fmt.Sprintf("удаление %s не подтверждено — нажмите Down ещё раз или проверьте console.quickpod.io", shorts(left)))
+		return
+	}
 	c.set("off", "машины удалены, оплата остановлена")
 }
 
@@ -626,7 +767,48 @@ func (c *Core) checkCredit() {
 	c.changed()
 }
 
-// Tick runs every 30 s: balance, and the tunnel to the main machine is reopened when it drops.
+// reconcile, every 10 minutes beside no Up or Down: a machine of this program that QuickPod lists and state.json does
+// not (a rent whose answer was lost) is billed unseen - it is taken into state.json, so the window shows it and Down
+// deletes it.
+func (c *Core) reconcile() {
+	c.mu.Lock()
+	due := time.Since(c.lastReconcile) > 10*time.Minute && c.qp.Key() != ""
+	if due {
+		c.lastReconcile = time.Now()
+	}
+	c.mu.Unlock()
+	if !due {
+		return
+	}
+	ours, err := c.ourPods()
+	if err != nil {
+		c.debugf("сверка с QuickPod: %v", err)
+		return
+	}
+	c.mu.Lock()
+	var found []string
+	for _, p := range ours {
+		known := p.UUID == c.st.ID
+		for _, r := range c.st.Pending {
+			known = known || r.ID == p.UUID
+		}
+		if !known {
+			c.st.Pending = append(c.st.Pending, Rented{p.UUID, p.Machine, p.GPU, p.Geo, p.Dph, now()})
+			found = append(found, p.UUID)
+		}
+	}
+	if len(found) > 0 {
+		c.saveState()
+	}
+	c.mu.Unlock()
+	if len(found) > 0 {
+		c.logf("⚠ у QuickPod есть машины этой программы, о которых она не знала: %s — они оплачиваются, Down удалит их", shorts(found))
+		c.changed()
+	}
+}
+
+// Tick runs every 30 s: balance, the check for unseen machines, and the tunnel to the main machine is reopened when it
+// drops.
 func (c *Core) Tick() {
 	c.mu.Lock()
 	id, creditAge, cleanAge := c.st.ID, time.Since(c.lastCredit), time.Since(c.lastClean)
@@ -640,15 +822,16 @@ func (c *Core) Tick() {
 		c.mu.Unlock()
 		c.cleanLogs()
 	}
-	if id == "" {
-		return
-	}
 	select {
 	case c.busy <- struct{}{}: // a reconnect can take minutes: one at a time, and never beside Up or Down
 	default:
 		return
 	}
 	defer func() { <-c.busy }()
+	c.reconcile()
+	if id == "" {
+		return
+	}
 	if !c.tunnel().alive() {
 		c.restoreTunnel(id)
 	}
@@ -727,7 +910,7 @@ func (c *Core) Startup() {
 	c.mu.Lock()
 	rented := map[string]Pod{}
 	for _, p := range live {
-		if p.Name == Label {
+		if p.ours() {
 			rented[p.UUID] = p
 		}
 	}

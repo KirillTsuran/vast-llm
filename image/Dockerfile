@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Strata engine (pinned commit) + llmd + monitoring stack, for Vast.ai (runtype args: /usr/local/bin/llmd).
+# Strata engine (pinned commit) + llmd + monitoring stack; QuickPod runs it from a template (launch mode docker, CMD llmd).
 # Build context is the repository root: docker build -f image/Dockerfile .
 # Model weights are NOT in the image: llmd downloads the pinned revision in model.json with SHA256 checks.
 FROM golang:1.27 AS llmd
