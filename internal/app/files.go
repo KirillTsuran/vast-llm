@@ -1,5 +1,5 @@
-// Package app is the VastLLM logic without the window: files next to the exe, the Vast API,
-// renting (two-host race), the SSH tunnel and the 30-second upkeep tick.
+// Package app is the VastLLM logic without the window: files next to the exe, the QuickPod API,
+// renting (optionally a two-host race), the SSH tunnel and the 30-second upkeep tick.
 package app
 
 import (
@@ -13,24 +13,26 @@ import (
 )
 
 const (
-	// Label marks the machines rented by this program at Vast.
+	// Label marks the machines rented by this program (the pod's altname at QuickPod).
 	Label = "vast-llm"
 	// Model is the name the engine in the image answers to (image/model.json).
 	Model = "sc117-abliterated-iq3_xxs"
 	// defaultImage is built from image/ of the same major version; VASTLLM_IMAGE overrides it for tests.
-	defaultImage = "ghcr.io/kirilltsuran/vast-llm:2"
+	defaultImage = "ghcr.io/kirilltsuran/vast-llm:3"
+	provider     = "quickpod"
 )
 
-// GPUs are the cards offered in the window: the engine in the image is compiled for these three.
-var GPUs = []string{"RTX 3090", "RTX 4090", "RTX 5090"}
+// GPUs are the cards offered in the window: the engine in the image is compiled for them (sm_86, sm_89, sm_120).
+var GPUs = []string{"RTX 3090", "RTX 3090 Ti", "RTX 4090", "RTX 5090"}
 
 // Config is config.json next to the exe.
 type Config struct {
-	VastKey string `json:"vast_api_key"`
-	GPU     string `json:"gpu"`
-	// the race rents the 2 cheapest; if the pricier one comes up first, the cheapest gets this many seconds to catch up
+	Key string `json:"quickpod_api_key"`
+	// the account's template (console.quickpod.io → Templates): image ghcr.io/kirilltsuran/vast-llm:3, launch mode docker
+	Template string `json:"quickpod_template_uuid"`
+	GPU      string `json:"gpu"`
+	// the race rents the 2 best machines; if the second comes up first, the best gets this many seconds to catch up
 	Grace       int     `json:"cheapest_grace_seconds"`
-	Datacenter  bool    `json:"datacenter_only"`
 	Race        bool    `json:"race_two_hosts"`
 	LocalPort   int     `json:"local_port"`
 	GrafanaPort int     `json:"grafana_port"`
@@ -44,13 +46,13 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	return Config{GPU: GPUs[0], Grace: 20, Race: true, LocalPort: 8080, GrafanaPort: 3000, UsdRub: 83.56,
+	return Config{GPU: GPUs[0], Grace: 20, LocalPort: 8080, GrafanaPort: 3000, UsdRub: 83.56,
 		Autostart: true, LogDays: 30, Debug: true}
 }
 
 // Rented is one machine of an Up that has not picked its winner yet.
 type Rented struct {
-	ID      int64   `json:"id"`
+	ID      string  `json:"pod_uuid"`
 	Machine int64   `json:"machine"`
 	GPU     string  `json:"gpu"`
 	Geo     string  `json:"geo"`
@@ -60,7 +62,8 @@ type Rented struct {
 
 // State is state.json: every rented machine, written right after renting.
 type State struct {
-	ID          int64    `json:"instance_id"`
+	Provider    string   `json:"provider"` // "quickpod"; a state.json without it is of the Vast versions
+	ID          string   `json:"pod_uuid"`
 	Machine     int64    `json:"machine_id"`
 	GPU         string   `json:"gpu"`
 	Geo         string   `json:"geo"`
@@ -95,7 +98,7 @@ func (c *Core) loadConfig() string {
 	switch {
 	case os.IsNotExist(err):
 		c.setConfig(cfg)
-		return "создан config.json рядом с программой: впишите vast_api_key"
+		return "создан config.json рядом с программой: впишите quickpod_api_key и quickpod_template_uuid"
 	case err == nil:
 		err = json.Unmarshal(raw, &cfg)
 	}
@@ -103,8 +106,8 @@ func (c *Core) loadConfig() string {
 		return "config.json не читается: " + err.Error()
 	}
 	c.setConfig(cfg) // rewrites the file: new keys appear, keys of older versions go away
-	if strings.TrimSpace(cfg.VastKey) == "" {
-		return "впишите vast_api_key в config.json и нажмите Up"
+	if strings.TrimSpace(cfg.Key) == "" || strings.TrimSpace(cfg.Template) == "" {
+		return "впишите quickpod_api_key и quickpod_template_uuid в config.json и нажмите Up"
 	}
 	return ""
 }
@@ -120,6 +123,7 @@ func (c *Core) setConfig(cfg Config) {
 
 // saveState is atomic: a crash or power loss never leaves a half-written state.json. Callers hold c.mu.
 func (c *Core) saveState() {
+	c.st.Provider = provider
 	if c.st.BadMachines == nil {
 		c.st.BadMachines = []int64{} // written as [] rather than null
 	}
@@ -141,8 +145,12 @@ func (c *Core) loadState() {
 		err = json.Unmarshal(raw, &st)
 	}
 	if err != nil {
-		// not fatal: Startup adopts every machine with our label that Vast still lists
-		c.Log("state.json не читается (" + err.Error() + "), машины будут найдены по списку Vast")
+		// not fatal: Startup adopts every machine with our label that QuickPod still lists
+		c.Log("state.json не читается (" + err.Error() + "), машины будут найдены по списку QuickPod")
+		return
+	}
+	if st.Provider != provider { // machine numbers and the blacklist of Vast mean nothing at QuickPod
+		c.Log("state.json остался от версии для Vast — начинаю с чистого")
 		return
 	}
 	c.mu.Lock()

@@ -3,7 +3,7 @@
   "repo": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF",
   "revision": "eec4e10a2c29b440a2ae85591fa11569ce752963",
   "context": 262144,
-  "parallel": 3,
+  "parallel": 1,
   "weights": {
     "name": "IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00001-of-00002.gguf",
     "size": 47342144896,

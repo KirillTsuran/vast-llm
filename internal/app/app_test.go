@@ -24,40 +24,56 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// ---------- files written by VastLLM 1.x stay readable ----------
+// ---------- files written by the Vast versions ----------
 
-func TestReadsFilesOfVersion1(t *testing.T) {
+func TestReadsFilesOfVastVersions(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"vast_api_key":"k","gpu":"RTX 4090","cheapest_grace_seconds":7,
 		"race_two_hosts":false,"local_port":8181,"image":"ghcr.io/kirilltsuran/vast-llm:latest","model":"qwen3.8-27b-uncensored","usd_rub":83.4839}`), 0o600)
 	os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"instance_id":0,"gpu":"","created":"0001-01-01T00:00:00","host_key":"",
 		"bad_machines":[143971,147516],"pending":[{"id":5,"machine":9,"gpu":"RTX 3090","geo":"SE","usd_per_hour":0.35,"created":"2026-10-05T13:08:11.1234567Z"}]}`), 0o600)
 	c := New(dir)
+	var logged []string
+	c.OnLog = func(s string) { logged = append(logged, s) }
 	c.loadState()
-	if hint := c.loadConfig(); hint != "" {
-		t.Fatalf("config with a key must load clean, got %q", hint)
+	if hint := c.loadConfig(); !strings.Contains(hint, "quickpod_api_key") {
+		t.Errorf("a config of Vast asks for the QuickPod key, got %q", hint)
 	}
 	cfg := c.Config()
 	if cfg.GPU != "RTX 4090" || cfg.Grace != 7 || cfg.Race || cfg.LocalPort != 8181 || cfg.GrafanaPort != 3000 || !cfg.Autostart {
 		t.Errorf("config: %+v", cfg)
 	}
 	rewritten, _ := os.ReadFile(filepath.Join(dir, "config.json"))
-	if strings.Contains(string(rewritten), "image") || strings.Contains(string(rewritten), `"model"`) {
-		t.Errorf("keys of version 1 must go away on rewrite: %s", rewritten)
+	for _, gone := range []string{`"image"`, `"model"`, "vast_api_key", "datacenter_only"} {
+		if strings.Contains(string(rewritten), gone) {
+			t.Errorf("%s must go away on rewrite: %s", gone, rewritten)
+		}
 	}
-	if len(c.st.BadMachines) != 2 || len(c.st.Pending) != 1 || c.st.Pending[0].Created.Year() != 2026 || !c.st.Created.IsZero() {
-		t.Errorf("state: %+v", c.st)
+	if c.st.ID != "" || len(c.st.BadMachines) != 0 || len(c.st.Pending) != 0 || len(logged) != 1 || !strings.Contains(logged[0], "для Vast") {
+		t.Errorf("the machines and blacklist of Vast mean nothing at QuickPod: state %+v, logged %q", c.st, logged)
+	}
+}
+
+func TestStateRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	c := New(dir)
+	c.st = State{ID: "3f2a9c10-aaaa", Machine: 303, BadMachines: []int64{7}, Pending: []Rented{{ID: "b1-x", Machine: 8, Created: now()}}}
+	c.saveState()
+	again := New(dir)
+	again.loadState()
+	if again.st.ID != "3f2a9c10-aaaa" || again.st.Provider != provider || len(again.st.Pending) != 1 || again.st.Pending[0].ID != "b1-x" || again.st.BadMachines[0] != 7 {
+		t.Errorf("state after a restart: %+v", again.st)
 	}
 }
 
 func TestBrokenStateIsReportedNotFatal(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"instance_id":`), 0o600)
+	os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"pod_uuid":`), 0o600)
 	c := New(dir)
 	var logged []string
 	c.OnLog = func(s string) { logged = append(logged, s) }
 	c.loadState()
-	if len(logged) != 1 || !strings.Contains(logged[0], "state.json не читается") || c.st.ID != 0 {
+	if len(logged) != 1 || !strings.Contains(logged[0], "state.json не читается") || c.st.ID != "" {
 		t.Errorf("logged %q, state %+v", logged, c.st)
 	}
 }
@@ -93,117 +109,197 @@ func TestModelMatchesImage(t *testing.T) {
 // ---------- offers ----------
 
 func TestUsableOffers(t *testing.T) {
-	keep, dropped := usable([]Offer{
-		{ID: 1, Machine: 10, Dph: 0.40, Inet: 6862, Geo: "The Netherlands, NL"},
-		{ID: 2, Machine: 11, Dph: 0.235, InetCost: 0.0026, Inet: 4186, Geo: "Ontario, CA"}, // cheaper rent, but $0.20 of traffic: 0.438
-		{ID: 3, Machine: 12, Dph: 0.40, Inet: 900, Geo: "Spain, ES"},
-		{ID: 4, Machine: 13, Dph: 0.308, InetCost: 0.052, Geo: "Oman, OM"}, // the download alone is $4
-		{ID: 5, Machine: 14, Dph: 0.10, Geo: "Sichuan, CN"},
-		{ID: 6, Machine: 99, Dph: 0.10, Geo: "US"},
-	}, []int64{99})
-	if got := fmt.Sprint(len(keep), keep[0].ID, keep[1].ID, keep[2].ID); got != "3 1 3 2" {
-		t.Errorf("cheapest first hour first, faster network wins a tie: %v", keep)
+	base := Offer{GPU: "RTX 3090", GPUs: 1, RAM: 62, Threads: 16, PCIe: "3", Lanes: "16", Inet: 900, FreeDisk: 800, Reliability: 97}
+	with := func(id int64, f func(o *Offer)) Offer {
+		o := base
+		o.ID, o.Machine = id, id+100
+		f(&o)
+		return o
 	}
-	if len(dropped) != 3 || !strings.Contains(dropped[0], "дорогой трафик") {
+	keep, dropped := usable([]Offer{
+		with(1, func(o *Offer) { o.Dph = 0.18 }),
+		with(2, func(o *Offer) { o.Dph = 0.18; o.RAM, o.Threads, o.PCIe = 125, 24, "4" }), // the ~110 tok/s configuration
+		with(3, func(o *Offer) { o.Dph = 0.15; o.Threads = 20 }),
+		with(4, func(o *Offer) { o.Dph = 0.15; o.Threads = 24 }),
+		with(5, func(o *Offer) { o.Dph = 0.10; o.RAM = 31 }),
+		with(6, func(o *Offer) { o.Dph = 0.10; o.Threads = 8 }),
+		with(7, func(o *Offer) { o.Dph = 0.10; o.Inet = 61 }),
+		with(8, func(o *Offer) { o.Dph = 0.10; o.Reliability = 90 }),
+		with(9, func(o *Offer) { o.Dph = 0.10; o.FreeDisk = 100 }),
+		with(10, func(o *Offer) { o.Dph = 0.10; o.Machine = 99 }),
+		with(11, func(o *Offer) { o.Dph = 0.05; o.GPU = "RTX 3090 Ti" }),
+		with(12, func(o *Offer) { o.Dph = 0.05; o.GPUs = 2 }),
+		with(13, func(o *Offer) { o.Dph = 0.05; o.Occupied = true }),
+	}, "RTX 3090", []int64{99})
+	var got []int64
+	for _, o := range keep {
+		got = append(got, o.ID)
+	}
+	if fmt.Sprint(got) != "[2 4 3 1]" {
+		t.Errorf("the fast configuration first, then the cheapest, then more cores: %v", got)
+	}
+	if len(dropped) != 6 || !strings.Contains(strings.Join(dropped, "|"), "мало RAM") || !strings.Contains(strings.Join(dropped, "|"), "чёрном списке") {
 		t.Errorf("dropped: %v", dropped)
 	}
 }
 
-// ---------- Vast API ----------
-
-func testVast(h http.HandlerFunc) (*Vast, *httptest.Server) {
-	srv := httptest.NewServer(h)
-	v := newVast(func() string { return "secret" }, func(string, ...any) {})
-	v.Base, v.Pause = srv.URL, time.Millisecond
-	return v, srv
+func TestSSHPort(t *testing.T) {
+	for ports, want := range map[string]int{
+		// port_mappings and Ports of a real QuickPod pod (2026-10-10), as podFrom joins them
+		`22 -> <a target="_new" href="http://114.23.254.176:57450">114.23.254.176:57450</a> | ` +
+			"0.0.0.0:57450->22/tcp, 0.0.0.0:57451->22/tcp, [::]:57450->22/tcp": 57450,
+		"0.0.0.0:40022->22/tcp, :::40022->22/tcp, 0.0.0.0:40023->8080/tcp": 40022,
+		`{"22/tcp":[{"HostIp":"0.0.0.0","HostPort":"41022"}]}`:             41022,
+		`{"22": 42022, "8888": 42023}`:                                     42022,
+		"22:43022,8888:43023":                                              43022,
+		"22:22":                                                            0, // not mapped yet
+		"":                                                                 0,
+	} {
+		if got := (Pod{Ports: ports}).sshPort(); got != want {
+			t.Errorf("%q: port %d, want %d", ports, got, want)
+		}
+	}
 }
 
-func TestVastRetriesOnlyServerErrors(t *testing.T) {
+// ---------- QuickPod API ----------
+
+func testQuickPod(h http.HandlerFunc) (*QuickPod, *httptest.Server) {
+	srv := httptest.NewServer(h)
+	q := newQuickPod(func() string { return "qpk_secret" }, func(string, ...any) {})
+	q.Base, q.Pause = srv.URL, time.Millisecond
+	return q, srv
+}
+
+func TestQuickPodRetriesOnlyServerErrors(t *testing.T) {
 	calls := 0
-	v, srv := testVast(func(w http.ResponseWriter, r *http.Request) {
+	q, srv := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if r.Header.Get("Authorization") != "Bearer secret" {
-			t.Errorf("auth header %q", r.Header.Get("Authorization"))
+		if r.Header.Get("X-API-Key") != "qpk_secret" || r.URL.Path != "/update/api/me" {
+			t.Errorf("%s, key %q", r.URL.Path, r.Header.Get("X-API-Key"))
 		}
 		if calls < 3 {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
-		io.WriteString(w, `{"credit":1.5,"balance":0.25}`)
+		io.WriteString(w, `{"credit":10,"credit_limit":500}`)
 	})
 	defer srv.Close()
-	if credit, err := v.Credit(context.Background()); err != nil || credit != 1.75 || calls != 3 {
+	if credit, err := q.Credit(context.Background()); err != nil || credit != 10 || calls != 3 {
 		t.Errorf("credit %v err %v calls %d", credit, err, calls)
 	}
 
 	calls = 0
-	v, srv2 := testVast(func(w http.ResponseWriter, r *http.Request) {
+	q, srv2 := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		http.Error(w, "no such offer", http.StatusBadRequest)
+		http.Error(w, `{"error":"offer is busy"}`, http.StatusNotAcceptable)
 	})
 	defer srv2.Close()
-	if _, err := v.Rent(context.Background(), 7, "img", "cHVi"); err == nil || !strings.Contains(err.Error(), "HTTP 400: no such offer") || calls != 1 {
+	if _, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); err == nil || !strings.Contains(err.Error(), "HTTP 406") || calls != 1 {
 		t.Errorf("a 4xx answer is final: err %v calls %d", err, calls)
 	}
 
 	calls = 0
-	v, srv3 := testVast(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusInternalServerError) })
+	q, srv3 := testQuickPod(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusInternalServerError) })
 	defer srv3.Close()
-	if _, err := v.Instances(context.Background()); err == nil || calls != 4 {
+	if _, err := q.Pods(context.Background()); err == nil || calls != 4 {
 		t.Errorf("4 attempts, then the error: err %v calls %d", err, calls)
 	}
 }
 
 func TestRentRequest(t *testing.T) {
-	v, srv := testVast(func(w http.ResponseWriter, r *http.Request) {
+	q, srv := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		if r.Method != http.MethodPut || r.URL.Path != "/v0/asks/7/" || body["image"] != "img" || body["disk"] != float64(diskGB) ||
-			body["runtype"] != "args" || body["env"] != "-e PUBKEY_B64=cHVi -p 22:22" || body["label"] != Label {
+		if r.Method != http.MethodPost || r.URL.Path != "/update/api/createpod" || body["offers_id"] != float64(7) || body["template_uuid"] != "tpl" ||
+			body["disk_size"] != strconv.Itoa(diskGB) || body["docker_options"] != "-p 22:22 -e PUBKEY_B64=cHVi" || body["altname"] != Label {
 			t.Errorf("%s %s %v", r.Method, r.URL.Path, body)
 		}
-		io.WriteString(w, `{"success":true,"new_contract":42}`)
+		io.WriteString(w, `{"status":"success","pod_uuid":"9b1c-42"}`)
 	})
 	defer srv.Close()
-	if id, err := v.Rent(context.Background(), 7, "img", "cHVi"); id != 42 || err != nil {
-		t.Errorf("id %d err %v", id, err)
+	if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); id != "9b1c-42" || err != nil {
+		t.Errorf("id %q err %v", id, err)
+	}
+
+	// an answer without the UUID: the pod is found in the list by its label and offer
+	q, srv2 := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/update/api/createpod":
+			io.WriteString(w, `{"status":"success","message":"Pod created"}`)
+		case "/update/api/gpu_pods":
+			io.WriteString(w, `[{"pod_uuid":"other","altname":"vast-llm","offers_id":8},{"pod_uuid":"mine","altname":"vast-llm","offers_id":7}]`)
+		}
+	})
+	defer srv2.Close()
+	if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); id != "mine" || err != nil {
+		t.Errorf("found by label and offer: id %q err %v", id, err)
+	}
+}
+
+func TestOffersAndPodsParse(t *testing.T) {
+	q, srv := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rentable":
+			io.WriteString(w, `[{"id":7151,"machines_id":303,"gpu_type":"NVIDIA GeForce RTX 3090","hourly_cost":0.18,"memory":125,"cpus":24,
+				"gpu_pcie":"4","gpu_lanes":"16","num_gpus":1,"occupied":false,"_machines":{"cpu_name":"AMD Ryzen 9 5900X 12-Core Processor ",
+				"geolocation":"US","inet_down":909.49,"avail_disk_space":3288,"reliability":97.6,"verification":true}}]`)
+		case "/update/api/gpu_pods":
+			io.WriteString(w, `[{"pod_uuid":"aa-1","altname":"vast-llm","State":"running","public_ipaddr":"1.2.3.4","machines_id":303,
+				"hourly_cost":"0.2","port_mappings":"{\"22/tcp\":[{\"HostPort\":\"40022\"}]}","_offers":{"gpu_type":"NVIDIA GeForce RTX 3090"},
+				"_machines":{"geolocation":"US"}},{"pod_uuid":"bb-2","altname":"vast-llm","destroyed":true}]`)
+		}
+	})
+	defer srv.Close()
+	offers, err := q.Offers(context.Background())
+	if err != nil || len(offers) != 1 {
+		t.Fatalf("offers %v err %v", offers, err)
+	}
+	if o := offers[0]; o.GPU != "RTX 3090" || o.RAM != 125 || o.Threads != 24 || !o.fast() || o.CPU != "AMD Ryzen 9 5900X 12-Core Processor" || !o.Verified || o.Inet < 909 {
+		t.Errorf("offer %+v", o)
+	}
+	pods, err := q.Pods(context.Background())
+	if err != nil || len(pods) != 1 {
+		t.Fatalf("a destroyed pod is not listed: %v %v", pods, err)
+	}
+	if p := pods[0]; p.UUID != "aa-1" || p.Name != Label || !p.running() || p.sshPort() != 40022 || p.Dph != 0.2 || p.GPU != "RTX 3090" || p.Machine != 303 {
+		t.Errorf("pod %+v", p)
 	}
 }
 
 // ---------- the two-host race ----------
 
 func TestPickWinner(t *testing.T) {
-	cheap, pricey := Rented{ID: 1, Dph: 0.30}, Rented{ID: 2, Dph: 0.40}
+	best, second := Rented{ID: "best", Dph: 0.18}, Rented{ID: "second", Dph: 0.30}
 	boom := errors.New("boom")
 	cases := []struct {
 		name   string
 		feed   func(ch chan<- dialed)
 		grace  time.Duration
-		winner int64
+		winner string
 		lost   int
 	}{
-		{"cheapest first wins at once", func(ch chan<- dialed) { ch <- dialed{r: cheap} }, time.Hour, 1, 0},
-		{"pricier first, cheapest inside the grace", func(ch chan<- dialed) { ch <- dialed{r: pricey}; ch <- dialed{r: cheap} }, time.Hour, 1, 1},
-		{"pricier first, cheapest too slow", func(ch chan<- dialed) { ch <- dialed{r: pricey} }, 20 * time.Millisecond, 2, 0},
-		{"pricier first, cheapest fails inside the grace", func(ch chan<- dialed) { ch <- dialed{r: pricey}; ch <- dialed{r: cheap, err: boom} }, time.Hour, 2, 1},
-		{"cheapest fails, pricier wins without waiting", func(ch chan<- dialed) { ch <- dialed{r: cheap, err: boom}; ch <- dialed{r: pricey} }, time.Hour, 2, 1},
-		{"both fail", func(ch chan<- dialed) { ch <- dialed{r: cheap, err: boom}; ch <- dialed{r: pricey, err: boom} }, time.Hour, 0, 2},
+		{"best first wins at once", func(ch chan<- dialed) { ch <- dialed{r: best} }, time.Hour, "best", 0},
+		{"second first, best inside the grace", func(ch chan<- dialed) { ch <- dialed{r: second}; ch <- dialed{r: best} }, time.Hour, "best", 1},
+		{"second first, best too slow", func(ch chan<- dialed) { ch <- dialed{r: second} }, 20 * time.Millisecond, "second", 0},
+		{"second first, best fails inside the grace", func(ch chan<- dialed) { ch <- dialed{r: second}; ch <- dialed{r: best, err: boom} }, time.Hour, "second", 1},
+		{"best fails, second wins without waiting", func(ch chan<- dialed) { ch <- dialed{r: best, err: boom}; ch <- dialed{r: second} }, time.Hour, "second", 1},
+		{"both fail", func(ch chan<- dialed) { ch <- dialed{r: best, err: boom}; ch <- dialed{r: second, err: boom} }, time.Hour, "", 2},
 	}
 	for _, tc := range cases {
 		ch := make(chan dialed, 2)
 		tc.feed(ch)
-		win, lost := pickWinner(context.Background(), []Rented{cheap, pricey}, ch, tc.grace, func(string, ...any) {})
-		got := int64(0)
+		win, lost := pickWinner(context.Background(), []Rented{best, second}, ch, tc.grace, func(string, ...any) {})
+		got := ""
 		if win != nil {
 			got = win.r.ID
 		}
 		if got != tc.winner || len(lost) != tc.lost {
-			t.Errorf("%s: winner %d (want %d), lost %d (want %d)", tc.name, got, tc.winner, len(lost), tc.lost)
+			t.Errorf("%s: winner %q (want %q), lost %d (want %d)", tc.name, got, tc.winner, len(lost), tc.lost)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if win, _ := pickWinner(ctx, []Rented{cheap}, make(chan dialed), time.Hour, func(string, ...any) {}); win != nil {
+	if win, _ := pickWinner(ctx, []Rented{best}, make(chan dialed), time.Hour, func(string, ...any) {}); win != nil {
 		t.Error("a cancelled Up has no winner")
 	}
 }
@@ -340,49 +436,54 @@ func TestTunnel(t *testing.T) {
 	tun.close()
 }
 
-// ---------- Startup, Up and Down against a fake Vast and the in-process sshd ----------
+// ---------- Startup, Up and Down against a fake QuickPod and the in-process sshd ----------
 
-type fakeVast struct {
-	mu        sync.Mutex
-	sshPort   string
-	next      int64
-	instances map[int64]Instance
-	rented    []map[string]any
-	deleted   []int64
+type fakeQuickPod struct {
+	mu      sync.Mutex
+	sshPort string
+	next    int
+	pods    map[string]map[string]any
+	rented  []map[string]any
+	deleted []string
 }
 
-func (f *fakeVast) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (f *fakeQuickPod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	machine := func(cpu string, inet float64) string {
+		return fmt.Sprintf(`{"cpu_name":%q,"geolocation":"US","inet_down":%v,"avail_disk_space":900,"reliability":97,"verification":true}`, cpu, inet)
+	}
 	switch {
-	case r.URL.Path == "/v0/users/current/":
-		io.WriteString(w, `{"credit":5}`)
+	case r.URL.Path == "/update/api/me":
+		io.WriteString(w, `{"credit":10}`)
 	case r.URL.Path == "/rate":
 		io.WriteString(w, `<ValCurs><Valute><CharCode>EUR</CharCode><Value>97,10</Value></Valute><Valute><CharCode>USD</CharCode><Value>83,4839</Value></Valute></ValCurs>`)
-	case r.URL.Path == "/v0/bundles/":
-		io.WriteString(w, `{"offers":[{"id":101,"machine_id":1,"dph_total":0.40,"inet_down":900,"geolocation":"SE","gpu_name":"RTX 3090"},
-			{"id":102,"machine_id":2,"dph_total":0.30,"inet_down":800,"geolocation":"PL","gpu_name":"RTX 3090"},
-			{"id":103,"machine_id":3,"dph_total":0.90,"inet_down":800,"geolocation":"US","gpu_name":"RTX 3090"}]}`)
-	case strings.HasPrefix(r.URL.Path, "/v0/asks/"):
+	case r.URL.Path == "/rentable":
+		fmt.Fprintf(w, `[{"id":101,"machines_id":1,"gpu_type":"NVIDIA GeForce RTX 3090","hourly_cost":0.15,"memory":62,"cpus":16,"gpu_pcie":"3","gpu_lanes":"16","num_gpus":1,"_machines":%s},
+			{"id":102,"machines_id":2,"gpu_type":"NVIDIA GeForce RTX 3090","hourly_cost":0.18,"memory":125,"cpus":24,"gpu_pcie":"4","gpu_lanes":"16","num_gpus":1,"_machines":%s},
+			{"id":103,"machines_id":3,"gpu_type":"NVIDIA GeForce RTX 4090","hourly_cost":0.10,"memory":125,"cpus":24,"gpu_pcie":"4","gpu_lanes":"16","num_gpus":1,"_machines":%s}]`,
+			machine("i7-7700", 900), machine("AMD Ryzen 9 5900X", 909), machine("x", 900))
+	case r.URL.Path == "/update/api/createpod":
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
 		f.rented = append(f.rented, body)
 		f.next++
-		offer, _ := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v0/asks/"), "/"), 10, 64)
-		inst := Instance{ID: f.next, Label: Label, Status: "running", IP: "127.0.0.1", Machine: offer - 100, GPU: "RTX 3090"}
-		json.Unmarshal([]byte(`{"22/tcp":[{"HostPort":"`+f.sshPort+`"}]}`), &inst.Ports)
-		f.instances[inst.ID] = inst
-		fmt.Fprintf(w, `{"success":true,"new_contract":%d}`, inst.ID)
-	case r.URL.Path == "/v1/instances/":
-		list := []Instance{}
-		for _, i := range f.instances {
-			list = append(list, i)
+		uuid := fmt.Sprintf("pod%d-%d", f.next, int(body["offers_id"].(float64)))
+		f.pods[uuid] = map[string]any{"pod_uuid": uuid, "altname": body["altname"], "State": "running", "public_ipaddr": "127.0.0.1",
+			"machines_id": body["offers_id"].(float64) - 100, "hourly_cost": 0.18, "Ports": "0.0.0.0:" + f.sshPort + "->22/tcp",
+			"_offers": map[string]any{"gpu_type": "NVIDIA GeForce RTX 3090"}, "_machines": map[string]any{"geolocation": "US"}}
+		fmt.Fprintf(w, `{"status":"success","pod_uuid":%q}`, uuid)
+	case r.URL.Path == "/update/api/gpu_pods":
+		list := []map[string]any{}
+		for _, p := range f.pods {
+			list = append(list, p)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"instances": list})
-	case r.Method == http.MethodDelete:
-		id, _ := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v0/instances/"), "/"), 10, 64)
-		delete(f.instances, id)
-		f.deleted = append(f.deleted, id)
+		json.NewEncoder(w).Encode(list)
+	case r.URL.Path == "/update/api/destroypod":
+		uuid := r.URL.Query().Get("pod_uuid")
+		delete(f.pods, uuid)
+		f.deleted = append(f.deleted, uuid)
+		io.WriteString(w, `{"message":"ok"}`)
 	default:
 		http.NotFound(w, r)
 	}
@@ -391,7 +492,8 @@ func (f *fakeVast) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func TestUpAndDown(t *testing.T) {
 	dir := t.TempDir()
 	apiPort, grafanaPort := freePort(t), freePort(t)
-	os.WriteFile(filepath.Join(dir, "config.json"), fmt.Appendf(nil, `{"vast_api_key":"k","cheapest_grace_seconds":1,"local_port":%d,"grafana_port":%d,"autostart":false}`, apiPort, grafanaPort), 0o600)
+	os.WriteFile(filepath.Join(dir, "config.json"), fmt.Appendf(nil, `{"quickpod_api_key":"k","quickpod_template_uuid":"tpl-1","race_two_hosts":true,
+		"cheapest_grace_seconds":1,"local_port":%d,"grafana_port":%d,"autostart":false}`, apiPort, grafanaPort), 0o600)
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "pong") }))
 	defer engine.Close()
 	signer, pub, _ := loadKey(filepath.Join(dir, "ssh_key.pem"))
@@ -407,12 +509,15 @@ func TestUpAndDown(t *testing.T) {
 		return "RTX 3090, 350.00 W\n"
 	})
 	_, sshPort, _ := net.SplitHostPort(addr)
-	fake := &fakeVast{sshPort: sshPort, instances: map[int64]Instance{}}
+	fake := &fakeQuickPod{sshPort: sshPort, pods: map[string]map[string]any{}}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
+	setup := func(c *Core) {
+		c.qp.Base, c.qp.Pause, c.poll, c.rates = srv.URL, time.Millisecond, 10*time.Millisecond, srv.URL+"/rate"
+	}
 	c := New(dir)
-	c.vast.Base, c.vast.Pause, c.poll, c.rates = srv.URL, time.Millisecond, 10*time.Millisecond, srv.URL+"/rate"
+	setup(c)
 	var phases []string
 	var mu sync.Mutex
 	c.OnChange = func() {
@@ -437,15 +542,15 @@ func TestUpAndDown(t *testing.T) {
 	if v.Phase != "ready" || !v.Tunnel || len(v.Machines) != 1 || !v.Machines[0].Main {
 		t.Fatalf("after Up: %+v", v)
 	}
-	if v.Machines[0].Dph != 0.30 {
-		t.Errorf("the cheapest machine (0.30) must win inside the grace, got %.2f", v.Machines[0].Dph)
+	if v.Machines[0].Machine != 2 {
+		t.Errorf("the fast configuration (machine 2) must win inside the grace, got machine %d", v.Machines[0].Machine)
 	}
 	fake.mu.Lock()
-	if len(fake.rented) != 2 {
-		t.Errorf("the race rents the 2 cheapest, rented %d", len(fake.rented))
+	if len(fake.rented) != 2 || fake.rented[0]["offers_id"] != float64(102) || fake.rented[1]["offers_id"] != float64(101) {
+		t.Errorf("the race rents the 2 best RTX 3090 (fast first), rented %v", fake.rented)
 	}
-	wantEnv := "-e PUBKEY_B64=" + base64.StdEncoding.EncodeToString([]byte(pub)) + " -p 22:22"
-	if fake.rented[0]["env"] != wantEnv || fake.rented[0]["image"] != defaultImage {
+	wantOpts := "-p 22:22 -e PUBKEY_B64=" + base64.StdEncoding.EncodeToString([]byte(pub))
+	if fake.rented[0]["docker_options"] != wantOpts || fake.rented[0]["template_uuid"] != "tpl-1" {
 		t.Errorf("rent body: %v", fake.rented[0])
 	}
 	fake.mu.Unlock()
@@ -467,7 +572,7 @@ func TestUpAndDown(t *testing.T) {
 	// a restart of the program finds the machine in state.json and reconnects
 	c.closeTunnel()
 	again := New(dir)
-	again.vast.Base, again.vast.Pause, again.poll, again.rates = srv.URL, time.Millisecond, 10*time.Millisecond, srv.URL+"/rate"
+	setup(again)
 	again.Startup()
 	if v := again.View(); v.Phase != "ready" || !v.Tunnel || v.Machines[0].ID != c.View().Machines[0].ID {
 		t.Fatalf("after restart: %+v", v)
@@ -478,8 +583,8 @@ func TestUpAndDown(t *testing.T) {
 		t.Fatalf("after Down: %+v", v)
 	}
 	fake.mu.Lock()
-	if len(fake.instances) != 0 {
-		t.Errorf("machines left at Vast: %v", fake.instances)
+	if len(fake.pods) != 0 {
+		t.Errorf("machines left at QuickPod: %v", fake.pods)
 	}
 	fake.mu.Unlock()
 	c.tasks.Wait()

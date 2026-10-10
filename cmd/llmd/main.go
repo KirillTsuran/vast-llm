@@ -27,8 +27,11 @@ const (
 	logDir    = "/var/log/llm"
 	stateFile = "/opt/llm/state"
 	engineURL = "http://127.0.0.1:8080"
-	// measured peak of everything in the container with model.json's three slots full: 56.7 GiB (context 262144)
+	// the experts (40 GiB) are pinned in RAM; with one request at 262144 the engine takes ~46 GiB, and a long prompt
+	// also needs the page cache for the PLE table read from disk
 	minRAMGiB = 58
+	// the MTP draft vocabulary (Strata's data/draft_vocab_<name>.bin): English, code and Cyrillic
+	draftVocab = "cyrillic"
 )
 
 // Model is /opt/llm/model.json: pinned Hugging Face files and the name the API answers to.
@@ -208,12 +211,14 @@ func bringUp(m Model) error {
 	python := strataDir + "/.venv/bin/python"
 	steps := [][]string{ // docs/ORCA.md of Strata: the manual setup of a model outside its installer menu
 		{python, "tools/mtp_rt.py", "--gguf", m.path(m.MTP), "--out", mtp},
-		{"cp", "data/draft_vocab.bin", mtp + "/draft_vocab.bin"},
 		{python, "tools/iq_pack.py", "--gguf", m.path(m.Weights), "--out", pack},
 	}
 	if _, err := os.Stat(pack + "/tokenizer"); err == nil {
 		steps = nil // prepared before this container restart
 	}
+	// the draft vocabulary of the MTP layer: the default one has 142 Cyrillic tokens of 18,580, so drafts of a Russian
+	// answer are almost never accepted; "cyrillic" covers English, code and Cyrillic
+	steps = append(steps, []string{"cp", "data/draft_vocab_" + draftVocab + ".bin", mtp + "/draft_vocab.bin"})
 	for _, argv := range steps {
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Dir = strataDir
@@ -225,7 +230,11 @@ func bringUp(m Model) error {
 		}
 	}
 
-	cfg, err := json.MarshalIndent(engineConfig(m, cpuLimit(cgroupDir)), "", " ")
+	cpus := cpuLimit(cgroupDir)
+	if cores := physicalCores("/proc/cpuinfo"); cores > 0 {
+		cpus = min(cpus, cores)
+	}
+	cfg, err := json.MarshalIndent(engineConfig(m, cpus), "", " ")
 	if err != nil {
 		return err
 	}
@@ -260,9 +269,10 @@ func bringUp(m Model) error {
 	return nil
 }
 
-// engineConfig is the configuration measured on RTX 3090 (results-maxreason-20261006), with the engine's own
-// defaults for the prompt cache and the repeat guard. The CPU threads follow the container's quota: the engine's
-// default counts the host's cores, which halves the speed on a machine with a quota.
+// engineConfig is the configuration measured on RTX 3090 (results-maxreason-20261006, and the ~110 tok/s setup of
+// 2026-10-10), with the engine's own defaults for the prompt cache and the repeat guard. `cpus` is the container's
+// quota capped at the physical cores (hyper-threads add nothing to the expert pool, results-cores-20261009); the
+// engine's default counts the host's cores, which halves the speed on a machine with a quota.
 func engineConfig(m Model, cpus int) map[string]any {
 	pack := dataDir + "/pack"
 	cfg := map[string]any{
@@ -272,7 +282,8 @@ func engineConfig(m Model, cpus int) map[string]any {
 			"--expert-profile", strataDir + "/data/expert-profile.bin", "--expert-cache", "auto", "--prefill", "auto",
 			"--spec", "4", "--spec-min-p", "0.5", "--mtp", dataDir + "/mtp/rt",
 			"--max-context", strconv.Itoa(m.Context), "--kv", "int8", "--kv-resident", "32768",
-			"--pool-workers", strconv.Itoa(max(1, cpus-1)), "--vram-reserve-mib", "2048",
+			// 700 MiB as in the ~110 tok/s setup (2048 before): ~800 more experts fit in VRAM
+			"--pool-workers", strconv.Itoa(max(1, cpus-1)), "--vram-reserve-mib", "700",
 		},
 		"cwd": strataDir, "tokenizer": pack + "/tokenizer", "model_name": m.Name, "lib_dirs": []string{"/usr/local/cuda-13.0/lib64"},
 		"host": "127.0.0.1", "port": 8080, "open_browser": false, "log": logDir + "/engine.log",
@@ -280,8 +291,8 @@ func engineConfig(m Model, cpus int) map[string]any {
 		// prompt) gets the answer shortened to the room left instead of a 400 that stops its turn
 		"fit_max_tokens": true,
 	}
-	// every slot keeps its own context: +3.1 GiB of RAM and -0.95 GiB of the expert cache in VRAM. Three slots with
-	// three 243K-token prompts at once peak at 56.7 GiB for the whole container, under the 60.2 GiB of a 64 GB host.
+	// every slot keeps its own context (+3.1 GiB of RAM, -0.95 GiB of the expert cache in VRAM) and decodes without the
+	// MTP drafts: on a 24 GB card slots cut a single answer by ~10% and add nothing to the total, so model.json has one
 	if m.Parallel > 1 {
 		cfg["parallel"] = m.Parallel
 	}
@@ -335,6 +346,29 @@ func cpuLimit(cgroup string) int {
 	out, _ := exec.Command("nproc").Output()
 	n, _ := strconv.Atoi(strings.TrimSpace(string(out)))
 	return n
+}
+
+// physicalCores counts the distinct (physical id, core id) pairs of /proc/cpuinfo; 0 when it does not say.
+func physicalCores(cpuinfo string) int {
+	raw, err := os.ReadFile(cpuinfo)
+	if err != nil {
+		return 0
+	}
+	cores := map[[2]string]bool{}
+	var socket string
+	for _, line := range strings.Split(string(raw), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "physical id":
+			socket = strings.TrimSpace(value)
+		case "core id":
+			cores[[2]string{socket, strings.TrimSpace(value)}] = true
+		}
+	}
+	return len(cores)
 }
 
 func lastLine(out []byte) string {
