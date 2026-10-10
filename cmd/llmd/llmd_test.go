@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -97,12 +98,30 @@ func TestMachineChecks(t *testing.T) {
 	}
 }
 
+// the expert pool gets one worker per physical core: hyper-threads added nothing in the RTX 3090 test (results-cores-20261009)
+func TestPhysicalCores(t *testing.T) {
+	var b strings.Builder
+	for cpu := range 24 { // Ryzen 9 5900X: 12 cores, 2 threads each
+		fmt.Fprintf(&b, "processor\t: %d\nphysical id\t: 0\ncore id\t\t: %d\nflags\t\t: avx2\n\n", cpu, cpu%12)
+	}
+	dir := cgroup(t, map[string]string{"cpuinfo": b.String(), "none": "processor : 0\n"})
+	if n := physicalCores(filepath.Join(dir, "cpuinfo")); n != 12 {
+		t.Errorf("24 threads on 12 cores -> 12, got %d", n)
+	}
+	if n := physicalCores(filepath.Join(dir, "none")); n != 0 {
+		t.Errorf("cpuinfo without core ids -> 0 (the quota decides), got %d", n)
+	}
+	if n := physicalCores(filepath.Join(dir, "missing")); n != 0 {
+		t.Errorf("no cpuinfo -> 0, got %d", n)
+	}
+}
+
 func TestEngineConfig(t *testing.T) {
 	m := Model{Name: "sc117", Context: 262144, Weights: File{Name: "IQ3_XXS/a-00001-of-00002.gguf"}, PLE: File{Name: "IQ3_XXS/a-00002-of-00002.gguf"}}
 	cfg := engineConfig(m, 15)
 	args := strings.Join(cfg["args"].([]string), " ")
 	for _, want := range []string{"--pool-workers 14", "--max-context 262144", "--native /opt/llm/data/model/a-00001-of-00002.gguf",
-		"--ple-gguf /opt/llm/data/model/a-00002-of-00002.gguf", "--vram-reserve-mib 2048", "--kv-resident 32768"} {
+		"--ple-gguf /opt/llm/data/model/a-00002-of-00002.gguf", "--vram-reserve-mib 700", "--kv-resident 32768"} {
 		if !strings.Contains(filepath.ToSlash(args), want) {
 			t.Errorf("args lack %q: %s", want, args)
 		}

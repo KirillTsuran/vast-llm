@@ -28,7 +28,7 @@ jobs:
           # ":2" is what VastLLM 2.x rents; a run from another branch only gets its commit tag (VASTLLM_IMAGE to try it)
           tags: |
             ghcr.io/kirilltsuran/vast-llm:${{ github.sha }}
-            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/kirilltsuran/vast-llm:2' || '' }}
+            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/kirilltsuran/vast-llm:3' || '' }}
           labels: org.opencontainers.image.source=https://github.com/KirillTsuran/vast-llm
           cache-from: type=gha
           cache-to: type=gha,mode=max
