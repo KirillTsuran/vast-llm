@@ -118,7 +118,7 @@ func TestPhysicalCores(t *testing.T) {
 
 func TestEngineConfig(t *testing.T) {
 	m := Model{Name: "sc117", Context: 262144, Weights: File{Name: "IQ3_XXS/a-00001-of-00002.gguf"}, PLE: File{Name: "IQ3_XXS/a-00002-of-00002.gguf"}}
-	cfg := engineConfig(m, 15)
+	cfg := engineConfig(m, 15, 60.2)
 	args := strings.Join(cfg["args"].([]string), " ")
 	for _, want := range []string{"--pool-workers 14", "--max-context 262144", "--native /opt/llm/data/model/a-00001-of-00002.gguf",
 		"--ple-gguf /opt/llm/data/model/a-00002-of-00002.gguf", "--vram-reserve-mib 700", "--kv-resident 32768"} {
@@ -133,8 +133,14 @@ func TestEngineConfig(t *testing.T) {
 		t.Errorf("one request at a time is the engine's default: no \"parallel\" key, got %v", cfg["parallel"])
 	}
 	m.Parallel = 3
-	if got := engineConfig(m, 15)["parallel"]; got != 3 {
+	if got := engineConfig(m, 15, 60.2)["parallel"]; got != 3 {
 		t.Errorf("three slots must reach the engine's config, got %v", got)
+	}
+	for mem, want := range map[float64]string{125: "--conversation-cache-mib 16384 --conversation-cache-slots 4", 62: "--conversation-cache-mib 6144", 58: ""} {
+		got := strings.Join(engineConfig(m, 15, mem)["args"].([]string), " ")
+		if want == "" && strings.Contains(got, "--conversation-cache") || want != "" && !strings.Contains(got, want) {
+			t.Errorf("%.0f GiB of RAM: the conversation cache gets what the engine leaves (want %q): %s", mem, want, got)
+		}
 	}
 	if strings.Contains(args, "--prompt-cache") || cfg["repeat_stop_tokens"] != nil || cfg["host"] != "127.0.0.1" {
 		t.Errorf("prompt cache and repeat guard stay at the engine's defaults, the API stays on loopback: %v", cfg)
