@@ -39,7 +39,7 @@ func runWindow(core *app.Core, startInTray bool, showEvent windows.Handle) error
 	w := &window{core: core}
 	bold := Font{Family: "Segoe UI", PointSize: 14, Bold: true}
 	if err := (MainWindow{
-		AssignTo: &w.mw, Title: "VastLLM — GPU для ZCode", Size: Size{Width: 700, Height: 520}, MinSize: Size{Width: 560, Height: 360},
+		AssignTo: &w.mw, Title: "VastLLM — GPU для ZCode (QuickPod)", Size: Size{Width: 700, Height: 520}, MinSize: Size{Width: 560, Height: 360},
 		Layout: VBox{}, Visible: false,
 		Children: []Widget{
 			Label{AssignTo: &w.phase, Font: bold},
@@ -200,7 +200,7 @@ func infoText(v app.View) string {
 	total := 0.0
 	var b strings.Builder
 	if len(v.Machines) == 0 {
-		fmt.Fprintf(&b, "Ничего не арендовано · Up возьмёт самую дешёвую %s · курс %.2f ₽/$", v.Cfg.GPU, rub)
+		fmt.Fprintf(&b, "Ничего не арендовано · Up возьмёт лучшую свободную %s · курс %.2f ₽/$", v.Cfg.GPU, rub)
 	} else {
 		var lines []string
 		for _, m := range v.Machines {
@@ -210,9 +210,9 @@ func infoText(v app.View) string {
 			if !m.Main {
 				mark, note = "○", " (запуск)"
 			}
-			lines = append(lines, fmt.Sprintf("%s #%d · %s · %s · %.1f ₽/ч · %d мин · ≈ %.0f ₽%s", mark, m.ID, m.GPU, m.Geo, m.Dph*rub, int(hours*60), hours*m.Dph*rub, note))
+			lines = append(lines, fmt.Sprintf("%s #%s · %s · %s · %.1f ₽/ч · %d мин · ≈ %.0f ₽%s", mark, m.Short(), m.GPU, m.Geo, m.Dph*rub, int(hours*60), hours*m.Dph*rub, note))
 		}
-		fmt.Fprintf(&b, "Арендовано в Vast (%d), всего %.1f ₽/ч:\n%s", len(v.Machines), total*rub, strings.Join(lines, "\n"))
+		fmt.Fprintf(&b, "Арендовано в QuickPod (%d), всего %.1f ₽/ч:\n%s", len(v.Machines), total*rub, strings.Join(lines, "\n"))
 		if v.Phase == "ready" {
 			tunnel := "нет"
 			if v.Tunnel {
@@ -225,7 +225,7 @@ func infoText(v app.View) string {
 		}
 	}
 	if v.Credit != nil {
-		fmt.Fprintf(&b, "\nБаланс Vast: $%.2f (≈ %.0f ₽)", *v.Credit, *v.Credit*rub)
+		fmt.Fprintf(&b, "\nБаланс QuickPod: $%.2f (≈ %.0f ₽)", *v.Credit, *v.Credit*rub)
 		if total > 0 {
 			fmt.Fprintf(&b, " · хватит примерно на %.0f ч", *v.Credit/total)
 		}

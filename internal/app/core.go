@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -26,9 +25,9 @@ type Core struct {
 	OnChange func()       // something shown in the window changed
 	OnLog    func(string) // a line for the window's journal
 
-	vast   *Vast
+	qp     *QuickPod
 	debug  atomic.Bool
-	poll   time.Duration // pause between polls of Vast and of the machine
+	poll   time.Duration // pause between polls of QuickPod and of the machine
 	rates  string        // where the dollar rate comes from
 	tasks  sync.WaitGroup
 	busy   chan struct{}
@@ -51,7 +50,7 @@ type Core struct {
 func New(dir string) *Core {
 	c := &Core{Dir: dir, cfg: defaultConfig(), phase: "off", poll: 5 * time.Second, busy: make(chan struct{}, 1), lastStats: time.Now(),
 		rates: "https://www.cbr.ru/scripts/XML_daily.asp"}
-	c.vast = newVast(func() string { return strings.TrimSpace(c.Config().VastKey) }, c.debugf)
+	c.qp = newQuickPod(func() string { return strings.TrimSpace(c.Config().Key) }, c.debugf)
 	return c
 }
 
@@ -75,7 +74,7 @@ func (c *Core) View() View {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v := View{Phase: c.phase, Message: c.message, Cfg: c.cfg, Credit: c.credit, Tunnel: c.tun.alive()}
-	if c.st.ID != 0 {
+	if c.st.ID != "" {
 		v.Machines = append(v.Machines, Machine{Rented{c.st.ID, c.st.Machine, c.st.GPU, c.st.Geo, c.st.Dph, c.st.Created}, true})
 	}
 	for _, r := range c.st.Pending {
@@ -133,13 +132,6 @@ func (c *Core) sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func image() string {
-	if v := os.Getenv("VASTLLM_IMAGE"); v != "" {
-		return v
-	}
-	return defaultImage
-}
-
 // SetGPU is used by the next Up; a machine already rented keeps its GPU until Down.
 func (c *Core) SetGPU(gpu string) {
 	cfg := c.Config()
@@ -164,7 +156,7 @@ func (c *Core) RefreshRate() {
 	rate, err := func() (float64, error) {
 		req, _ := http.NewRequest(http.MethodGet, c.rates, nil)
 		req.Header.Set("User-Agent", "VastLLM") // the bank answers 403 to Go's default User-Agent
-		resp, err := c.vast.HTTP.Do(req)
+		resp, err := c.qp.HTTP.Do(req)
 		if err != nil {
 			return 0, err
 		}
@@ -192,24 +184,24 @@ func (c *Core) RefreshRate() {
 // ---------- SSH ----------
 
 // dial waits for the container and opens SSH to its own sshd (port 22 mapped to a random external port).
-func (c *Core) dial(ctx context.Context, id int64, pinned string, boot time.Duration) (*ssh.Client, string, error) {
+func (c *Core) dial(ctx context.Context, id, pinned string, boot time.Duration) (*ssh.Client, string, error) {
 	deadline := time.Now().Add(boot)
 	var running time.Time
 	last := errors.New("машина не запустилась вовремя")
 	lastAPI := ""
 	for time.Now().Before(deadline) {
-		inst, err := c.vast.Instance(ctx, id)
+		inst, err := c.qp.Pod(ctx, id)
 		switch {
 		case ctx.Err() != nil:
 			return nil, "", ctx.Err()
 		case err != nil:
 			if err.Error() != lastAPI {
 				lastAPI = err.Error()
-				c.Log("Vast API: " + lastAPI)
+				c.Log("QuickPod API: " + lastAPI)
 			}
 		case inst == nil:
 			return nil, "", errors.New("машина исчезла")
-		case inst.Status == "running" && inst.IP != "":
+		case inst.running():
 			if running.IsZero() {
 				running = time.Now()
 			}
@@ -217,11 +209,11 @@ func (c *Core) dial(ctx context.Context, id int64, pinned string, boot time.Dura
 				addr := net.JoinHostPort(inst.IP, strconv.Itoa(port))
 				client, hostKey, err := dialSSH(ctx, addr, c.signer, pinned)
 				if err == nil {
-					c.debugf("ssh %s машины %d: подключено", addr, id)
+					c.debugf("ssh %s машины %s: подключено", addr, short(id))
 					return client, hostKey, nil
 				}
 				last = err
-				c.debugf("ssh %s машины %d: %v", addr, id, err)
+				c.debugf("ssh %s машины %s: %v", addr, short(id), err)
 			}
 			if time.Since(running) > 3*time.Minute {
 				return nil, "", fmt.Errorf("SSH недоступен 3 мин после старта: %w", last)
@@ -292,14 +284,14 @@ func (c *Core) reconnect(ctx context.Context, wait time.Duration) error {
 
 // Up rents a machine (or reconnects to the rented one) and waits until the model answers.
 func (c *Core) Up() {
-	if hint := c.loadConfig(); hint != "" && c.vast.Key() == "" {
+	if hint := c.loadConfig(); hint != "" {
 		c.set("error", hint)
 		return
 	}
 	c.debug.Store(c.Config().Debug)
 	c.checkCredit()
 	if v := c.View(); v.Credit != nil && *v.Credit < 0.5 {
-		c.set("error", fmt.Sprintf("на балансе Vast $%.2f — пополните на console.vast.ai, иначе Vast сразу остановит машину", *v.Credit))
+		c.set("error", fmt.Sprintf("на балансе QuickPod $%.2f — пополните на console.quickpod.io (Settings → Billing), иначе QuickPod сразу остановит машину", *v.Credit))
 		return
 	}
 	select {
@@ -323,27 +315,28 @@ func (c *Core) up(ctx context.Context) error {
 	c.mu.Lock()
 	id := c.st.ID
 	c.mu.Unlock()
-	if id != 0 && !c.tunnel().alive() {
-		c.set("booting", fmt.Sprintf("подключаюсь к машине %d", id))
+	if id != "" && !c.tunnel().alive() {
+		c.set("booting", fmt.Sprintf("подключаюсь к машине %s", short(id)))
 		if err := c.reconnect(ctx, 5*time.Minute); err != nil {
-			return fmt.Errorf("машина %d не отвечает по SSH (%w). Она не удалена: Up — повторить, Down — удалить", id, err)
+			return fmt.Errorf("машина %s не отвечает по SSH (%w). Она не удалена: Up — повторить, Down — удалить", short(id), err)
 		}
 	}
-	for round := 1; id == 0 && round <= 3; round++ {
+	for round := 1; id == "" && round <= 3; round++ {
 		var err error
 		if id, err = c.rentAndRace(ctx, start); err != nil {
 			return err
 		}
 	}
-	if id == 0 {
+	if id == "" {
 		return errors.New("не удалось поднять машину за 3 попытки")
 	}
 	return c.waitReady(ctx, id, start)
 }
 
-// rentAndRace rents the cheapest machines (or takes the ones an interrupted Up left in state.json), keeps the first
-// that answers by SSH and deletes the rest. It returns 0 when no machine came up and another round may help.
-func (c *Core) rentAndRace(ctx context.Context, start time.Time) (int64, error) {
+// rentAndRace rents the best machine (two with the race; or takes the ones an interrupted Up left in state.json),
+// keeps the first that answers by SSH and deletes the rest. It returns "" when no machine came up and another round
+// may help.
+func (c *Core) rentAndRace(ctx context.Context, start time.Time) (string, error) {
 	cfg := c.Config()
 	c.mu.Lock()
 	cands := append([]Rented(nil), c.st.Pending...)
@@ -352,26 +345,26 @@ func (c *Core) rentAndRace(ctx context.Context, start time.Time) (int64, error) 
 	if len(cands) > 0 {
 		c.logf("продолжаю прерванный запуск: машины %s", ids(cands))
 	} else {
-		all, err := c.vast.Offers(ctx, cfg.GPU, cfg.Datacenter)
+		all, err := c.qp.Offers(ctx)
 		if err != nil {
-			return 0, err
+			return "", err
 		}
-		offers, dropped := usable(all, bad)
+		offers, dropped := usable(all, cfg.GPU, bad)
 		for _, d := range dropped {
 			c.debugf("предложение %s", d)
 		}
 		if len(offers) == 0 {
-			return 0, fmt.Errorf("в Vast сейчас нет свободных %s с %d ГБ RAM — выберите другую видеокарту или повторите Up", cfg.GPU, minRAMMB/1000)
+			return "", fmt.Errorf("в QuickPod сейчас нет свободных %s с ≥ %d ГБ RAM и ≥ %d потоками — выберите другую видеокарту или повторите Up", cfg.GPU, minRAMGB, minThreads)
 		}
 		want := 1
 		if cfg.Race {
 			want = 2
-			c.set("renting", fmt.Sprintf("арендую 2 самые дешёвые %s (аренда + трафик), оставлю первую поднявшуюся (дешёвой даю %d с форы)", cfg.GPU, cfg.Grace))
+			c.set("renting", fmt.Sprintf("арендую 2 лучшие %s, оставлю первую поднявшуюся (лучшей даю %d с форы)", cfg.GPU, cfg.Grace))
 		} else {
-			c.set("renting", "арендую самую дешёвую "+cfg.GPU)
+			c.set("renting", "арендую "+describe(offers[0]))
 		}
 		for _, o := range offers[:min(want, len(offers))] {
-			id, err := c.vast.Rent(ctx, o.ID, image(), base64.StdEncoding.EncodeToString([]byte(c.pub)))
+			id, err := c.qp.Rent(ctx, o.ID, cfg.Template, base64.StdEncoding.EncodeToString([]byte(c.pub)))
 			c.mu.Lock()
 			if err != nil {
 				c.st.BadMachines = append(c.st.BadMachines, o.Machine)
@@ -386,11 +379,10 @@ func (c *Core) rentAndRace(ctx context.Context, start time.Time) (int64, error) 
 				c.logf("аренда не удалась (%s): %v", o.Geo, err)
 				continue
 			}
-			c.logf("арендована %d: %s %s %.1f ₽/ч, сеть %d Мбит/с, скачивание модели ≈ %.0f ₽", id, o.GPU, o.Geo, o.Dph*cfg.UsdRub, int(o.Inet),
-				o.InetCost*modelGB*cfg.UsdRub)
+			c.logf("арендована %s: %s, %.1f ₽/ч, скачивание модели ≈ %.0f ₽", short(id), describe(o), o.Dph*cfg.UsdRub, modelGB*0.004*cfg.UsdRub)
 		}
 		if len(cands) == 0 {
-			return 0, ctx.Err()
+			return "", ctx.Err()
 		}
 	}
 	c.set("booting", "машина качает образ и запускается (~5 мин)")
@@ -416,7 +408,7 @@ func (c *Core) rentAndRace(ctx context.Context, start time.Time) (int64, error) 
 				d.client.Close()
 			}
 		}
-		return 0, ctx.Err()
+		return "", ctx.Err()
 	}
 	for _, d := range lost {
 		if d.client != nil {
@@ -425,13 +417,13 @@ func (c *Core) rentAndRace(ctx context.Context, start time.Time) (int64, error) 
 		c.mu.Lock()
 		if d.err != nil && !errors.Is(d.err, context.Canceled) {
 			c.st.BadMachines = append(c.st.BadMachines, d.r.Machine)
-			c.logLocked(fmt.Sprintf("машина %d не подошла: %v", d.r.ID, d.err))
+			c.logLocked(fmt.Sprintf("машина %s не подошла: %v", short(d.r.ID), d.err))
 		}
 		c.mu.Unlock()
 		c.Go("delete", func() { c.destroyPending(d.r.ID) })
 	}
 	if win == nil {
-		return 0, nil
+		return "", nil
 	}
 	c.mu.Lock()
 	c.st.Pending = without(c.st.Pending, win.r.ID)
@@ -440,9 +432,9 @@ func (c *Core) rentAndRace(ctx context.Context, start time.Time) (int64, error) 
 	c.saveState()
 	c.mu.Unlock()
 	if err := c.attach(win.client); err != nil {
-		return 0, err
+		return "", err
 	}
-	c.logf("выбрана машина %d (%s), SSH через %s", win.r.ID, win.r.Geo, clock(time.Since(start)))
+	c.logf("выбрана машина %s (%s), SSH через %s", short(win.r.ID), win.r.Geo, clock(time.Since(start)))
 	return win.r.ID, nil
 }
 
@@ -460,7 +452,7 @@ func deref(d *dialed) []dialed {
 	return []dialed{*d}
 }
 
-// pickWinner reads SSH results until one machine is up. cands[0] is the cheapest (offers are rented cheapest first):
+// pickWinner reads SSH results until one machine is up. cands[0] is the best (offers are rented best first):
 // another machine that comes up before it waits `grace` for it. It returns the winner (nil: none came up, or ctx
 // ended) and every other result it has read.
 func pickWinner(ctx context.Context, cands []Rented, results <-chan dialed, grace time.Duration, logf func(string, ...any)) (*dialed, []dialed) {
@@ -483,23 +475,23 @@ func pickWinner(ctx context.Context, cands []Rented, results <-chan dialed, grac
 		if cheapestSeen {
 			return &d, lost
 		}
-		logf("первой поднялась %d ($%.3f/ч), жду до %d с более дешёвую %d ($%.3f/ч)", d.r.ID, d.r.Dph, int(grace.Seconds()), cheapest.ID, cheapest.Dph)
+		logf("первой поднялась %s ($%.3f/ч), жду до %d с лучшую %s ($%.3f/ч)", short(d.r.ID), d.r.Dph, int(grace.Seconds()), short(cheapest.ID), cheapest.Dph)
 		timer := time.NewTimer(grace)
 		defer timer.Stop()
 		for {
 			select {
 			case o := <-results:
 				if o.r.ID == cheapest.ID && o.err == nil {
-					logf("дешёвая %d успела — беру её, %d удаляю", o.r.ID, d.r.ID)
+					logf("лучшая %s успела — беру её, %s удаляю", short(o.r.ID), short(d.r.ID))
 					return &o, append(lost, d)
 				}
 				lost = append(lost, o)
 				if o.r.ID != cheapest.ID {
 					continue
 				}
-				logf("дешёвая %d не поднялась — оставляю %d", cheapest.ID, d.r.ID)
+				logf("лучшая %s не поднялась — оставляю %s", short(cheapest.ID), short(d.r.ID))
 			case <-timer.C:
-				logf("дешёвая %d не успела за %d с — оставляю %d", cheapest.ID, int(grace.Seconds()), d.r.ID)
+				logf("лучшая %s не успела за %d с — оставляю %s", short(cheapest.ID), int(grace.Seconds()), short(d.r.ID))
 			case <-ctx.Done():
 				return nil, append(lost, d)
 			}
@@ -510,12 +502,12 @@ func pickWinner(ctx context.Context, cands []Rented, results <-chan dialed, grac
 }
 
 // waitReady follows /opt/llm/state, which llmd in the container keeps up to date.
-func (c *Core) waitReady(ctx context.Context, id int64, start time.Time) error {
+func (c *Core) waitReady(ctx context.Context, id string, start time.Time) error {
 	for deadline := time.Now().Add(60 * time.Minute); time.Now().Before(deadline); {
 		if !c.tunnel().alive() {
 			c.Log("связь потеряна, переподключаюсь")
 			if err := c.reconnect(ctx, 3*time.Minute); err != nil {
-				return fmt.Errorf("связь с машиной %d потеряна (%w). Она не удалена: Up — повторить, Down — удалить", id, err)
+				return fmt.Errorf("связь с машиной %s потеряна (%w). Она не удалена: Up — повторить, Down — удалить", short(id), err)
 			}
 		}
 		state, _ := c.tunnel().exec("cat /opt/llm/state 2>/dev/null")
@@ -529,7 +521,7 @@ func (c *Core) waitReady(ctx context.Context, id int64, start time.Time) error {
 			c.st.BadMachines = append(c.st.BadMachines, c.st.Machine)
 			c.saveState()
 			c.mu.Unlock()
-			return fmt.Errorf("машина %d не подошла: %s. Нажмите Down, затем Up — возьму другую", id, detail)
+			return fmt.Errorf("машина %s не подошла: %s. Нажмите Down, затем Up — возьму другую", short(id), detail)
 		case "downloading":
 			c.set("downloading", "качаю модель: "+detail)
 		case "preparing":
@@ -548,24 +540,24 @@ func (c *Core) waitReady(ctx context.Context, id int64, start time.Time) error {
 
 // ---------- Down ----------
 
-// destroy deletes a machine and waits until Vast no longer lists it.
-func (c *Core) destroy(id int64) error {
+// destroy deletes a machine and waits until QuickPod no longer lists it.
+func (c *Core) destroy(id string) error {
 	ctx := context.Background()
-	if err := c.vast.Destroy(ctx, id); err != nil {
-		c.logf("delete %d: %v", id, err)
+	if err := c.qp.Destroy(ctx, id); err != nil {
+		c.logf("delete %s: %v", short(id), err)
 	}
 	for range 40 {
-		if inst, err := c.vast.Instance(ctx, id); err == nil && inst == nil {
-			c.logf("машина %d удалена (подтверждено API)", id)
+		if pod, err := c.qp.Pod(ctx, id); err == nil && pod == nil {
+			c.logf("машина %s удалена (подтверждено API)", short(id))
 			return nil
 		}
 		time.Sleep(c.poll)
 	}
-	return fmt.Errorf("удаление %d не подтверждено, проверьте console.vast.ai", id)
+	return fmt.Errorf("удаление %s не подтверждено, проверьте console.quickpod.io", short(id))
 }
 
-// destroyPending deletes an extra machine of an Up (race loser) and drops it from state.json once Vast confirms.
-func (c *Core) destroyPending(id int64) {
+// destroyPending deletes an extra machine of an Up (race loser) and drops it from state.json once QuickPod confirms.
+func (c *Core) destroyPending(id string) {
 	if err := c.destroy(id); err != nil {
 		c.Log(err.Error())
 		return
@@ -587,8 +579,8 @@ func (c *Core) Down(reason string) {
 	c.busy <- struct{}{}
 	defer func() { <-c.busy }()
 	c.mu.Lock()
-	var all []int64
-	if c.st.ID != 0 {
+	var all []string
+	if c.st.ID != "" {
 		all = append(all, c.st.ID)
 	}
 	for _, r := range c.st.Pending {
@@ -599,7 +591,7 @@ func (c *Core) Down(reason string) {
 		c.set("off", "машин нет")
 		return
 	}
-	c.set("stopping", fmt.Sprintf("удаляю %v (%s)", all, reason))
+	c.set("stopping", fmt.Sprintf("удаляю %s (%s)", shorts(all), reason))
 	c.closeTunnel()
 	for _, id := range all {
 		if err := c.destroy(id); err != nil {
@@ -617,9 +609,9 @@ func (c *Core) Down(reason string) {
 // ---------- upkeep ----------
 
 func (c *Core) checkCredit() {
-	credit, err := c.vast.Credit(context.Background())
+	credit, err := c.qp.Credit(context.Background())
 	if err != nil {
-		c.debugf("баланс Vast не получен: %v", err)
+		c.debugf("баланс QuickPod не получен: %v", err)
 		return
 	}
 	c.mu.Lock()
@@ -627,9 +619,9 @@ func (c *Core) checkCredit() {
 	warn := credit < 1 && !c.lowCreditWarned
 	c.lowCreditWarned = credit < 1
 	c.mu.Unlock()
-	c.debugf("баланс Vast $%.2f", credit)
+	c.debugf("баланс QuickPod $%.2f", credit)
 	if warn {
-		c.logf("⚠ баланс Vast почти кончился: $%.2f. На нуле Vast сам остановит машину — пополните на console.vast.ai", credit)
+		c.logf("⚠ баланс QuickPod почти кончился: $%.2f. На нуле QuickPod сам остановит машину (диск продолжит оплачиваться) — пополните на console.quickpod.io", credit)
 	}
 	c.changed()
 }
@@ -639,7 +631,7 @@ func (c *Core) Tick() {
 	c.mu.Lock()
 	id, creditAge, cleanAge := c.st.ID, time.Since(c.lastCredit), time.Since(c.lastClean)
 	c.mu.Unlock()
-	if creditAge > 10*time.Minute && c.vast.Key() != "" {
+	if creditAge > 10*time.Minute && c.qp.Key() != "" {
 		c.checkCredit()
 	}
 	if cleanAge > 24*time.Hour {
@@ -648,7 +640,7 @@ func (c *Core) Tick() {
 		c.mu.Unlock()
 		c.cleanLogs()
 	}
-	if id == 0 {
+	if id == "" {
 		return
 	}
 	select {
@@ -667,14 +659,14 @@ func (c *Core) Tick() {
 	}
 	c.mu.Unlock()
 	if t := c.tunnel(); report && t != nil {
-		c.debugf("туннель %v, машина %d, запросов через туннель за 10 мин: %d", t.alive(), id, t.requests.Swap(0))
+		c.debugf("туннель %v, машина %s, запросов через туннель за 10 мин: %d", t.alive(), short(id), t.requests.Swap(0))
 	}
 }
 
-func (c *Core) restoreTunnel(id int64) {
+func (c *Core) restoreTunnel(id string) {
 	ctx := context.Background()
 	c.Log("связь потеряна, переподключаюсь")
-	inst, err := c.vast.Instance(ctx, id)
+	inst, err := c.qp.Pod(ctx, id)
 	switch {
 	case err != nil:
 		c.logf("переподключение не удалось: %v", err)
@@ -682,18 +674,18 @@ func (c *Core) restoreTunnel(id int64) {
 	case inst == nil:
 		c.closeTunnel()
 		c.mu.Lock()
-		c.st.ID = 0
+		c.st.ID = ""
 		c.saveState()
 		c.mu.Unlock()
-		c.set("error", "машина пропала у Vast — нажмите Up")
+		c.set("error", "машина пропала у QuickPod — нажмите Up")
 		return
-	case inst.Status == "exited" || inst.Status == "stopped" || inst.Intended == "stopped":
+	case inst.stopped():
 		c.checkCredit()
 		credit := 0.0
 		if v := c.View(); v.Credit != nil {
 			credit = *v.Credit
 		}
-		c.set("error", fmt.Sprintf("Vast остановил машину %d (обычно — кончился баланс; сейчас $%.2f). Пополните баланс, затем Down и Up", id, credit))
+		c.set("error", fmt.Sprintf("QuickPod остановил машину %s (обычно — кончился баланс; сейчас $%.2f; диск оплачивается и дальше). Пополните баланс, затем Down и Up", short(id), credit))
 		return
 	}
 	if err := c.reconnect(ctx, 3*time.Minute); err != nil {
@@ -706,7 +698,7 @@ func (c *Core) restoreTunnel(id int64) {
 	}
 }
 
-// Startup reconciles state.json with what is really rented at Vast (after a restart or a PC reboot), then reconnects.
+// Startup reconciles state.json with what is really rented at QuickPod (after a restart or a PC reboot), then reconnects.
 func (c *Core) Startup() {
 	var err error
 	if c.signer, c.pub, err = loadKey(c.path("ssh_key.pem")); err != nil {
@@ -720,30 +712,30 @@ func (c *Core) Startup() {
 	if hint != "" {
 		c.set("error", hint)
 	}
-	c.logf("настройки: GPU %s (самая дешёвая, фора %d с), порты %d/%d, гонка двух хостов %s, журнал %d дн, образ %s",
-		cfg.GPU, cfg.Grace, cfg.LocalPort, cfg.GrafanaPort, yesNo(cfg.Race), cfg.LogDays, image())
+	c.logf("настройки: QuickPod, GPU %s, шаблон %s (образ в нём: %s), порты %d/%d, гонка двух хостов %s, журнал %d дн",
+		cfg.GPU, short(cfg.Template), defaultImage, cfg.LocalPort, cfg.GrafanaPort, yesNo(cfg.Race), cfg.LogDays)
 	c.Go("rate", c.RefreshRate)
-	if c.vast.Key() == "" {
+	if c.qp.Key() == "" {
 		return
 	}
 	c.checkCredit()
-	live, err := c.vast.Instances(context.Background())
+	live, err := c.qp.Pods(context.Background())
 	if err != nil {
-		c.set("error", "не удалось проверить Vast: "+err.Error())
+		c.set("error", "не удалось проверить QuickPod: "+err.Error())
 		return
 	}
 	c.mu.Lock()
-	rented := map[int64]Instance{}
-	for _, i := range live {
-		if i.Label == Label {
-			rented[i.ID] = i
+	rented := map[string]Pod{}
+	for _, p := range live {
+		if p.Name == Label {
+			rented[p.UUID] = p
 		}
 	}
-	if _, ok := rented[c.st.ID]; c.st.ID != 0 && !ok {
-		c.logLocked(fmt.Sprintf("машины %d у Vast больше нет", c.st.ID))
-		c.st.ID = 0
+	if _, ok := rented[c.st.ID]; c.st.ID != "" && !ok {
+		c.logLocked(fmt.Sprintf("машины %s у QuickPod больше нет", short(c.st.ID)))
+		c.st.ID = ""
 	}
-	known := map[int64]bool{c.st.ID: true}
+	known := map[string]bool{c.st.ID: true}
 	var pending []Rented
 	for _, r := range c.st.Pending {
 		if _, ok := rented[r.ID]; ok {
@@ -760,22 +752,22 @@ func (c *Core) Startup() {
 	c.saveState()
 	main, extra := c.st.ID, append([]Rented(nil), pending...)
 	c.mu.Unlock()
-	c.logf("в Vast машин этой программы: %d", len(rented))
+	c.logf("в QuickPod машин этой программы: %d", len(rented))
 	switch {
-	case main != 0 && len(extra) > 0:
-		c.logf("лишние машины прерванного запуска %s — удаляю, основная %d", ids(extra), main)
+	case main != "" && len(extra) > 0:
+		c.logf("лишние машины прерванного запуска %s — удаляю, основная %s", ids(extra), short(main))
 		for _, r := range extra {
 			c.Go("delete", func() { c.destroyPending(r.ID) })
 		}
 		c.Up()
-	case main != 0 || len(extra) > 0:
+	case main != "" || len(extra) > 0:
 		c.Up()
 	default:
 		c.set("off", "машин нет")
 	}
 }
 
-func without(list []Rented, id int64) []Rented {
+func without(list []Rented, id string) []Rented {
 	var out []Rented
 	for _, r := range list {
 		if r.ID != id {
@@ -788,9 +780,37 @@ func without(list []Rented, id int64) []Rented {
 func ids(list []Rented) string {
 	var s []string
 	for _, r := range list {
-		s = append(s, strconv.FormatInt(r.ID, 10))
+		s = append(s, r.ID)
+	}
+	return shorts(s)
+}
+
+// Short is how the window names a machine.
+func (r Rented) Short() string { return short(r.ID) }
+
+// short is the first block of a pod UUID: enough to tell machines apart in the window and the journal.
+func short(uuid string) string {
+	if head, _, ok := strings.Cut(uuid, "-"); ok {
+		return head
+	}
+	return uuid
+}
+
+func shorts(list []string) string {
+	s := make([]string, len(list))
+	for i, id := range list {
+		s[i] = short(id)
 	}
 	return strings.Join(s, ", ")
+}
+
+// describe is how an offer shows in the window and the journal.
+func describe(o Offer) string {
+	fast := ""
+	if o.fast() {
+		fast = ", быстрая конфигурация"
+	}
+	return fmt.Sprintf("%s · %s, %d потоков · %.0f ГБ RAM · PCIe %s x%s · %s · сеть %.0f Мбит/с%s", o.GPU, o.CPU, o.Threads, o.RAM, o.PCIe, o.Lanes, o.Geo, o.Inet, fast)
 }
 
 func clock(d time.Duration) string {

@@ -1,4 +1,4 @@
-// VastLLM: a window with Up / Down that rents a GPU at Vast.ai and gives its OpenAI-compatible API on 127.0.0.1.
+// VastLLM: a window with Up / Down that rents a GPU at QuickPod and gives its OpenAI-compatible API on 127.0.0.1.
 package main
 
 // The manifest (common controls 6, DPI awareness) is linked from the .syso next to this file; after editing it:
