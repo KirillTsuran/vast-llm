@@ -217,6 +217,20 @@ func TestRentRequest(t *testing.T) {
 	if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); id != "9b1c-42" || err != nil {
 		t.Errorf("id %q err %v", id, err)
 	}
+
+	// an answer without the UUID: the pod is found in the list by its label and offer
+	q, srv2 := testQuickPod(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/update/api/createpod":
+			io.WriteString(w, `{"status":"success","message":"Pod created"}`)
+		case "/update/api/gpu_pods":
+			io.WriteString(w, `[{"pod_uuid":"other","altname":"vast-llm","offers_id":8},{"pod_uuid":"mine","altname":"vast-llm","offers_id":7}]`)
+		}
+	})
+	defer srv2.Close()
+	if id, err := q.Rent(context.Background(), 7, "tpl", "cHVi"); id != "mine" || err != nil {
+		t.Errorf("found by label and offer: id %q err %v", id, err)
+	}
 }
 
 func TestOffersAndPodsParse(t *testing.T) {

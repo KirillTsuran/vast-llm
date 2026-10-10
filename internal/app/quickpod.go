@@ -144,6 +144,7 @@ type Pod struct {
 	Intended string
 	IP       string
 	Machine  int64
+	Offer    int64
 	GPU      string
 	Geo      string
 	Dph      float64
@@ -159,7 +160,7 @@ func podFrom(m map[string]any) Pod {
 	return Pod{
 		UUID: firstNonEmpty(str(m["pod_uuid"]), str(m["Names"])), Name: str(m["altname"]), State: strings.ToLower(str(m["State"])),
 		Intended: strings.ToLower(str(m["intended_state"])), IP: firstNonEmpty(str(m["public_ipaddr"]), str(machine["public_ipaddr"])),
-		Machine: int64(num(m["machines_id"])), GPU: shortGPU(str(offer["gpu_type"])), Geo: str(machine["geolocation"]),
+		Machine: int64(num(m["machines_id"])), Offer: int64(num(m["offers_id"])), GPU: shortGPU(str(offer["gpu_type"])), Geo: str(machine["geolocation"]),
 		Dph: num(m["hourly_cost"]), Ports: ports,
 	}
 }
@@ -342,11 +343,17 @@ func (q *QuickPod) Rent(ctx context.Context, offer int64, template, pubKeyB64 st
 	if err := q.call(ctx, http.MethodPost, "/update/api/createpod", body, &r); err != nil {
 		return "", err
 	}
-	uuid := firstNonEmpty(str(r["pod_uuid"]), str(sub(r["data"])["pod_uuid"]))
-	if uuid == "" {
-		return "", fmt.Errorf("QuickPod не вернул pod_uuid: %.300s", str(r))
+	if uuid := firstNonEmpty(str(r["pod_uuid"]), str(sub(r["data"])["pod_uuid"])); uuid != "" {
+		return uuid, nil
 	}
-	return uuid, nil
+	// the pod may exist without its UUID in the answer: find it, or it would run (and be billed) unseen until a restart
+	pods, err := q.Pods(ctx)
+	for _, p := range pods {
+		if p.Name == Label && p.Offer == offer && p.UUID != "" {
+			return p.UUID, nil
+		}
+	}
+	return "", fmt.Errorf("QuickPod не вернул pod_uuid (%.300s), в списке машин её нет (%v)", str(r), err)
 }
 
 func (q *QuickPod) Destroy(ctx context.Context, uuid string) error {
