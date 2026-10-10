@@ -17,7 +17,7 @@ const (
 	Label = "vast-llm"
 	// Model is the name the engine in the image answers to (image/model.json).
 	Model = "sc117-abliterated-iq3_xxs"
-	// defaultImage is built from image/ of the same major version; VASTLLM_IMAGE overrides it for tests.
+	// defaultImage is built from image/ of the same major version.
 	defaultImage = "ghcr.io/kirilltsuran/vast-llm:3"
 	provider     = "quickpod"
 )
@@ -56,50 +56,37 @@ func defaultConfig() Config {
 
 // Rented is one machine of an Up that has not picked its winner yet.
 type Rented struct {
-	ID      string  `json:"pod_uuid"`
-	Machine int64   `json:"machine"`
-	GPU     string  `json:"gpu"`
-	Geo     string  `json:"geo"`
-	Dph     float64 `json:"usd_per_hour"`
-	Created stamp   `json:"created"`
+	ID      string    `json:"pod_uuid"`
+	Machine int64     `json:"machine"`
+	GPU     string    `json:"gpu"`
+	Geo     string    `json:"geo"`
+	Dph     float64   `json:"usd_per_hour"`
+	Created time.Time `json:"created"`
 }
 
 // State is state.json: every rented machine, written right after renting.
 type State struct {
-	Provider string   `json:"provider"` // "quickpod"; a state.json without it is of the Vast versions
-	ID       string   `json:"pod_uuid"`
-	Machine  int64    `json:"machine_id"`
-	GPU      string   `json:"gpu"`
-	Geo      string   `json:"geo"`
-	Dph      float64  `json:"usd_per_hour"`
-	Created  stamp    `json:"created"`
-	HostKey  string   `json:"host_key"`
-	Blocked  []Block  `json:"blocked"` // machines not to rent for a while, and why
-	Pending  []Rented `json:"pending"`
+	Provider string    `json:"provider"` // "quickpod"; a state.json without it is not read
+	ID       string    `json:"pod_uuid"`
+	Machine  int64     `json:"machine_id"`
+	GPU      string    `json:"gpu"`
+	Geo      string    `json:"geo"`
+	Dph      float64   `json:"usd_per_hour"`
+	Created  time.Time `json:"created"`
+	HostKey  string    `json:"host_key"`
+	Blocked  []Block   `json:"blocked"` // machines not to rent for a while, and why
+	Pending  []Rented  `json:"pending"`
 }
 
 // Block keeps a machine out of the offers until a time: for good when it cannot run the engine (no AVX2, too little
 // memory), for hours when it failed once (a download, SSH) - a busy or vanished offer is no fault of the machine.
 type Block struct {
-	Machine int64  `json:"machine"`
-	Until   stamp  `json:"until"`
-	Reason  string `json:"reason"`
+	Machine int64     `json:"machine"`
+	Until   time.Time `json:"until"`
+	Reason  string    `json:"reason"`
 }
 
-// stamp is a UTC time that also reads the zone-less form written by VastLLM 1.x ("0001-01-01T00:00:00").
-type stamp struct{ time.Time }
-
-func now() stamp { return stamp{time.Now().UTC()} }
-
-func (s *stamp) UnmarshalJSON(b []byte) error {
-	text := strings.Trim(string(b), `"`)
-	t, err := time.Parse(time.RFC3339Nano, text)
-	if err != nil {
-		t, err = time.Parse("2006-01-02T15:04:05.999999999", text)
-	}
-	s.Time = t.UTC()
-	return err
-}
+func now() time.Time { return time.Now().UTC() }
 
 func (c *Core) path(name string) string { return filepath.Join(c.Dir, name) }
 
@@ -133,7 +120,8 @@ func (c *Core) setConfig(cfg Config) {
 	}
 }
 
-// saveState is atomic: a crash or power loss never leaves a half-written state.json. Callers hold c.mu.
+// saveState replaces state.json by a rename, so a crash never leaves it half-written (no fsync: a power loss can still
+// lose the last write). Callers hold c.mu.
 func (c *Core) saveState() {
 	c.st.Provider = provider
 	if c.st.Blocked == nil {
@@ -147,9 +135,21 @@ func (c *Core) saveState() {
 	}
 }
 
+// loadState reads state.json of this provider. Another version's file is skipped: its machine numbers mean nothing at
+// QuickPod, and Startup finds this program's machines by their label.
 func (c *Core) loadState() {
 	raw, err := os.ReadFile(c.path("state.json"))
 	if os.IsNotExist(err) {
+		return
+	}
+	var head struct {
+		Provider string `json:"provider"`
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &head)
+	}
+	if err == nil && head.Provider != provider {
+		c.Log("state.json не от этой версии — начинаю с чистого")
 		return
 	}
 	var st State
@@ -159,27 +159,6 @@ func (c *Core) loadState() {
 	if err != nil {
 		// not fatal: Startup adopts every machine with our label that QuickPod still lists
 		c.Log("state.json не читается (" + err.Error() + "), машины будут найдены по списку QuickPod")
-		return
-	}
-	if st.Provider != provider { // machine numbers and the blacklist of Vast mean nothing at QuickPod
-		c.Log("state.json остался от версии для Vast — начинаю с чистого")
-		var vast struct {
-			ID      int64 `json:"instance_id"`
-			Pending []struct {
-				ID int64 `json:"id"`
-			} `json:"pending"`
-		}
-		json.Unmarshal(raw, &vast)
-		var left []string
-		if vast.ID != 0 {
-			left = append(left, fmt.Sprint(vast.ID))
-		}
-		for _, p := range vast.Pending {
-			left = append(left, fmt.Sprint(p.ID))
-		}
-		if len(left) > 0 { // this version cannot delete them: they would be billed by Vast unseen
-			c.Log("⚠ в нём были машины Vast " + strings.Join(left, ", ") + ": эта версия их не видит — удалите их на console.vast.ai, если они ещё есть")
-		}
 		return
 	}
 	c.mu.Lock()
@@ -199,11 +178,9 @@ func writeJSON(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
-// ---------- journal: logs\vast-llm-<date>.log, one file per day ----------
-
 var logMu sync.Mutex
 
-// Append writes one line to today's log file; usable before Core exists and from crash handlers.
+// Append writes one line to logs\vast-llm-<date>.log, one file per day; usable before Core exists and from crash handlers.
 func Append(dir, line string) {
 	logMu.Lock()
 	defer logMu.Unlock()
@@ -243,7 +220,11 @@ func (c *Core) debugf(format string, a ...any) {
 // cleanLogs deletes day logs older than log_retention_days.
 func (c *Core) cleanLogs() {
 	days := max(1, c.Config().LogDays)
-	files, _ := filepath.Glob(filepath.Join(c.Dir, "logs", "vast-llm-*.log"))
+	files, err := filepath.Glob(filepath.Join(c.Dir, "logs", "vast-llm-*.log"))
+	if err != nil { // Glob fails only on a malformed pattern, e.g. a '[' in the folder name
+		c.debugf("журналы не просмотрены: %v", err)
+		return
+	}
 	for _, f := range files {
 		info, err := os.Stat(f)
 		if err != nil || time.Since(info.ModTime()) < time.Duration(days)*24*time.Hour {

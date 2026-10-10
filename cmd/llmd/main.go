@@ -61,8 +61,8 @@ var engineRestarts atomic.Int64
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	os.MkdirAll(logDir, 0o755)
-	if own, err := os.OpenFile(logDir+"/llmd.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-		log.SetOutput(io.MultiWriter(os.Stderr, own)) // the file is what Loki and Grafana show
+	if logFile, err := os.OpenFile(logDir+"/llmd.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		log.SetOutput(io.MultiWriter(os.Stderr, logFile)) // the file is what Loki and Grafana show
 	}
 	startSSHD()
 	var model Model
@@ -218,8 +218,7 @@ func bringUp(m Model) error {
 	if _, err := os.Stat(pack + "/tokenizer"); err == nil {
 		steps = nil // prepared before this container restart
 	}
-	// the draft vocabulary of the MTP layer: the default one has 142 Cyrillic tokens of 18,580, so drafts of a Russian
-	// answer are almost never accepted; "cyrillic" covers English, code and Cyrillic
+	// the default draft vocabulary has 142 Cyrillic tokens of 18,580: drafts of a Russian answer are almost never accepted
 	steps = append(steps, []string{"cp", "data/draft_vocab_" + draftVocab + ".bin", mtp + "/draft_vocab.bin"})
 	for _, argv := range steps {
 		cmd := exec.Command(argv[0], argv[1:]...)
@@ -261,7 +260,7 @@ func bringUp(m Model) error {
 		probing := &http.Client{Timeout: 2 * time.Minute}
 		probe := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"Say OK"}],"max_tokens":4,"reasoning_effort":"none"}`, m.Name)
 		for ready := false; ; time.Sleep(5 * time.Second) {
-			was := ready
+			wasReady := ready
 			if !ready {
 				resp, err := probing.Post(engineURL+"/v1/chat/completions", "application/json", strings.NewReader(probe))
 				ready = err == nil && resp.StatusCode == http.StatusOK
@@ -273,7 +272,7 @@ func bringUp(m Model) error {
 			} else {
 				resp.Body.Close()
 			}
-			if ready && !was {
+			if ready && !wasReady {
 				setState("ready")
 			}
 		}
@@ -409,19 +408,19 @@ func physicalCores(cpuinfo string) int {
 type crashLoop struct{ at []time.Time }
 
 func (c *crashLoop) exit(t time.Time) bool {
-	keep := c.at[:0]
+	recent := c.at[:0]
 	for _, a := range c.at {
 		if t.Sub(a) < 10*time.Minute {
-			keep = append(keep, a)
+			recent = append(recent, a)
 		}
 	}
-	c.at = append(keep, t)
+	c.at = append(recent, t)
 	return len(c.at) >= 5
 }
 
 // crashReason is the engine's last line before keep's own "exited" lines: what it died of.
-func crashReason(log []byte) string {
-	lines := strings.Split(strings.TrimSpace(string(log)), "\n")
+func crashReason(text []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(text)), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		if line := strings.TrimSpace(lines[i]); line != "" && !strings.Contains(line, " exited (") {
 			return line

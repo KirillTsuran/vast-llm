@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,8 +118,7 @@ func (q *QuickPod) once(ctx context.Context, method, path string, body []byte) (
 	return resp.StatusCode, text, err
 }
 
-// ---------- loose JSON: the API's numbers and strings are not typed consistently ----------
-
+// The API's numbers and strings are not typed consistently, so str and num read either form.
 func str(v any) string {
 	switch x := v.(type) {
 	case nil:
@@ -138,12 +139,10 @@ func num(v any) float64 {
 	return f
 }
 
-func sub(v any) map[string]any {
+func object(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
 }
-
-// ---------- pods ----------
 
 // Pod is a rented machine as QuickPod reports it.
 type Pod struct {
@@ -163,7 +162,7 @@ type Pod struct {
 var ipInMapping = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3}):\d+`)
 
 func podFrom(m map[string]any) Pod {
-	machine, offer := sub(m["_machines"]), sub(m["_offers"])
+	machine, offer := object(m["_machines"]), object(m["_offers"])
 	ports := str(m["Ports"]) // Docker's "0.0.0.0:57450->22/tcp" first: port_mappings is HTML with the host's IP in it
 	if p := str(m["port_mappings"]); p != "" {
 		ports += " " + p
@@ -173,14 +172,14 @@ func podFrom(m map[string]any) Pod {
 	if list, ok := names.([]any); ok && len(list) > 0 {
 		names = list[0]
 	}
-	ip := firstNonEmpty(str(m["public_ipaddr"]), str(m["public_ipaddress"]), str(machine["public_ipaddr"]))
+	ip := cmp.Or(str(m["public_ipaddr"]), str(m["public_ipaddress"]), str(machine["public_ipaddr"]))
 	if ip == "" {
 		if found := ipInMapping.FindStringSubmatch(str(m["port_mappings"])); found != nil {
 			ip = found[1]
 		}
 	}
 	return Pod{
-		UUID: firstNonEmpty(str(m["pod_uuid"]), strings.TrimPrefix(str(names), "/")), Name: str(m["altname"]), State: strings.ToLower(str(m["State"])),
+		UUID: cmp.Or(str(m["pod_uuid"]), strings.TrimPrefix(str(names), "/")), Name: str(m["altname"]), State: strings.ToLower(str(m["State"])),
 		Intended: strings.ToLower(str(m["intended_state"])), IP: ip,
 		Machine: int64(num(m["machines_id"])), Offer: int64(num(m["offers_id"])), GPU: shortGPU(str(offer["gpu_type"])), Geo: str(machine["geolocation"]),
 		Dph: num(m["hourly_cost"]), Ports: ports,
@@ -189,15 +188,6 @@ func podFrom(m map[string]any) Pod {
 
 // ours: the machines of this program carry Label, or Label and the nonce of the Up that rented them.
 func (p Pod) ours() bool { return p.Name == Label || strings.HasPrefix(p.Name, Label+"-") }
-
-func firstNonEmpty(s ...string) string {
-	for _, v := range s {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
 
 var sshMapping = []*regexp.Regexp{
 	regexp.MustCompile(`(\d+)\s*->\s*22(?:/tcp)?\b`),                               // Docker's "0.0.0.0:40022->22/tcp"
@@ -252,8 +242,6 @@ func (q *QuickPod) Pod(ctx context.Context, uuid string) (*Pod, error) {
 	return nil, err
 }
 
-// ---------- offers ----------
-
 // Offer is a machine that can be rented.
 type Offer struct {
 	ID          int64
@@ -287,9 +275,10 @@ func (q *QuickPod) Offers(ctx context.Context) ([]Offer, error) {
 	}
 	offers := make([]Offer, 0, len(raw))
 	for _, m := range raw {
-		machine := sub(m["_machines"])
+		machine := object(m["_machines"])
 		occupied, _ := m["occupied"].(bool)
-		verified := strings.EqualFold(str(machine["verification"]), "true") || strings.EqualFold(str(machine["verification"]), "verified")
+		verification := str(machine["verification"])
+		verified := strings.EqualFold(verification, "true") || strings.EqualFold(verification, "verified")
 		offers = append(offers, Offer{
 			ID: int64(num(m["id"])), Machine: int64(num(m["machines_id"])), Dph: num(m["hourly_cost"]), GPU: shortGPU(str(m["gpu_type"])),
 			RAM: num(m["memory"]), Threads: int(num(m["cpus"])), CPU: strings.TrimSpace(str(machine["cpu_name"])), PCIe: str(m["gpu_pcie"]),
@@ -308,10 +297,8 @@ var (
 	oldCPU = regexp.MustCompile(`(?i)\b[XLWE][35]\d{3}\b|\bFX(?:\(tm\))?\s?-|Phenom|Opteron|Athlon|Pentium|Celeron`)
 )
 
-// lacksAVX2: the engine's expert kernels need AVX2. Xeon E3/E5/E7 before v3 (Sandy and Ivy Bridge), Core i3/i5/i7 of
-// the 2nd and 3rd generation and Ivy Bridge-E (i7-48xx/49xx), Xeon X/L/W/E 5xxx and 3xxx, AMD FX, Phenom, Opteron,
-// Athlon, Pentium and Celeron predate it. llmd refuses such a machine too, but only once it is rented and has pulled
-// the image (~5 min).
+// lacksAVX2: the engine's expert kernels need AVX2, which the older CPUs matched below lack. llmd refuses such a machine
+// too, but only after it is rented and has pulled the image (~5 min), so it is checked here.
 func lacksAVX2(cpu string) bool {
 	if m := xeonE.FindStringSubmatch(cpu); m != nil {
 		gen, _ := strconv.Atoi(m[3])
@@ -326,15 +313,15 @@ func lacksAVX2(cpu string) bool {
 
 var leadingNumber = regexp.MustCompile(`\d+(?:\.\d+)?`)
 
-// atoiPrefix reads "4", "4.0" or "x16" as a number; 0 when there is none.
-func atoiPrefix(s string) float64 {
+// numPrefix reads "4", "4.0" or "x16" as a number; 0 when there is none.
+func numPrefix(s string) float64 {
 	f, _ := strconv.ParseFloat(leadingNumber.FindString(s), 64)
 	return f
 }
 
 // fast: the configuration of the ~110 tok/s setup (all experts in RAM with room, PCIe 4.0+ x16, 10+ cores).
 func (o Offer) fast() bool {
-	return o.RAM >= fastRAMGB && atoiPrefix(o.PCIe) >= 4 && atoiPrefix(o.Lanes) >= 16 && o.Threads >= fastThreads
+	return o.RAM >= fastRAMGB && numPrefix(o.PCIe) >= 4 && numPrefix(o.Lanes) >= 16 && o.Threads >= fastThreads
 }
 
 // usable keeps the free single-GPU machines of the chosen card (or its Ti: the same VRAM, faster) the model runs well
@@ -349,7 +336,7 @@ func usable(offers []Offer, gpu string, bad []int64) (keep []Offer, dropped []st
 		switch {
 		case lacksAVX2(o.CPU):
 			reason = "процессор без AVX2"
-		case atoiPrefix(o.Lanes) > 0 && atoiPrefix(o.Lanes) < 8:
+		case numPrefix(o.Lanes) > 0 && numPrefix(o.Lanes) < 8:
 			reason = fmt.Sprintf("видеокарта на PCIe x%s: эксперты читаются по шине медленно", o.Lanes)
 		case o.RAM < minRAMGB:
 			reason = fmt.Sprintf("мало RAM: %.0f ГБ", o.RAM)
@@ -361,7 +348,7 @@ func usable(offers []Offer, gpu string, bad []int64) (keep []Offer, dropped []st
 			reason = fmt.Sprintf("медленная сеть: %.0f Мбит/с, модель качалась бы %.0f мин", o.Inet, modelGB*8000/o.Inet/60)
 		case o.Reliability > 0 && o.Reliability < minReliablePc:
 			reason = fmt.Sprintf("надёжность %.1f%%", o.Reliability)
-		case contains(bad, o.Machine):
+		case slices.Contains(bad, o.Machine):
 			reason = "машина в чёрном списке"
 		}
 		if reason == "" {
@@ -385,19 +372,9 @@ func usable(offers []Offer, gpu string, bad []int64) (keep []Offer, dropped []st
 	return keep, dropped
 }
 
-func contains(list []int64, x int64) bool {
-	for _, v := range list {
-		if v == x {
-			return true
-		}
-	}
-	return false
-}
-
-// Rent creates a pod on an offer from the account's template (the image runs llmd, which starts its own sshd with our
-// key on port 22) and names it `name`, unique to this rent. It returns the pod's UUID. The request is sent once; when
-// it fails or its answer has no UUID (a timeout, a dropped connection, Down pressed meanwhile) the pod may exist all
-// the same, so it is looked up by its name - otherwise it would run and be billed unseen.
+// Rent creates a pod from the account's template with the altname `name` and returns its UUID. The request is sent
+// once: when it fails or its answer has no UUID, the pod may exist all the same, so it is looked up by name - otherwise
+// it would run and be billed unseen.
 func (q *QuickPod) Rent(ctx context.Context, offer int64, template, pubKeyB64, name string) (string, error) {
 	body := map[string]any{
 		"offers_id": offer, "template_uuid": template, "disk_size": strconv.Itoa(diskGB), "altname": name,
@@ -405,7 +382,7 @@ func (q *QuickPod) Rent(ctx context.Context, offer int64, template, pubKeyB64, n
 	}
 	var r map[string]any
 	err := q.call(ctx, http.MethodPost, "/update/api/createpod", body, &r)
-	if uuid := firstNonEmpty(str(r["pod_uuid"]), str(sub(r["data"])["pod_uuid"])); err == nil && uuid != "" {
+	if uuid := cmp.Or(str(r["pod_uuid"]), str(object(r["data"])["pod_uuid"])); err == nil && uuid != "" {
 		return uuid, nil
 	}
 	look, cancel := context.WithTimeout(context.Background(), 40*time.Second) // also when ctx was cancelled by Down
