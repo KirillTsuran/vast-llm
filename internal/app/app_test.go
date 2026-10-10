@@ -145,6 +145,9 @@ func TestUsableOffers(t *testing.T) {
 
 func TestSSHPort(t *testing.T) {
 	for ports, want := range map[string]int{
+		// port_mappings and Ports of a real QuickPod pod (2026-10-10), as podFrom joins them
+		`22 -> <a target="_new" href="http://114.23.254.176:57450">114.23.254.176:57450</a> | ` +
+			"0.0.0.0:57450->22/tcp, 0.0.0.0:57451->22/tcp, [::]:57450->22/tcp": 57450,
 		"0.0.0.0:40022->22/tcp, :::40022->22/tcp, 0.0.0.0:40023->8080/tcp": 40022,
 		`{"22/tcp":[{"HostIp":"0.0.0.0","HostPort":"41022"}]}`:             41022,
 		`{"22": 42022, "8888": 42023}`:                                     42022,
