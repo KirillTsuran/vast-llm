@@ -17,7 +17,7 @@ import (
 )
 
 var phaseNames = map[string]string{
-	"off": "Выключено", "renting": "Аренда", "booting": "Запуск", "downloading": "Скачивание модели",
+	"off": "Выключено", "waiting": "Жду быструю машину", "renting": "Аренда", "booting": "Запуск", "downloading": "Скачивание модели",
 	"loading": "Загрузка модели", "ready": "Работает", "stopping": "Удаление", "error": "Ошибка",
 }
 
@@ -187,10 +187,11 @@ func (w *window) refresh() {
 		w.lastInfoText = text
 		w.info.SetText(text)
 	}
-	busy := slices.Contains([]string{"renting", "booting", "downloading", "loading", "stopping"}, v.Phase)
+	busy := slices.Contains([]string{"waiting", "renting", "booting", "downloading", "loading", "stopping"}, v.Phase)
 	w.up.SetEnabled(!busy && v.Phase != "ready")
 	w.gpu.SetEnabled(!busy)
-	w.down.SetEnabled(len(v.Machines) > 0 && v.Phase != "stopping")
+	// also with no machine known: Down asks QuickPod for every machine of this program and deletes what it finds
+	w.down.SetEnabled(v.Phase != "stopping")
 	w.grafana.SetEnabled(v.Tunnel)
 }
 

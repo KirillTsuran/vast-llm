@@ -44,7 +44,16 @@ func newQuickPod(key func() string, debug func(string, ...any)) *QuickPod {
 	return &QuickPod{Key: key, Base: "https://api.quickpod.org", HTTP: &http.Client{Timeout: 40 * time.Second}, Pause: 3 * time.Second, Debug: debug}
 }
 
-// call retries network errors, 5xx and 429 (4 attempts); any other answer is final.
+// HTTPError is an answer QuickPod gave and the call did not retry: a 4xx says nothing about the machine.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %.300s", e.Status, e.Body) }
+
+// call retries a GET on network errors, 5xx and 429 (4 attempts); any other answer is final. A POST is never repeated:
+// a createpod whose answer was lost may still have created the machine, and a second one would run unseen.
 func (q *QuickPod) call(ctx context.Context, method, path string, in, out any) error {
 	var body []byte
 	if in != nil {
@@ -68,13 +77,13 @@ func (q *QuickPod) call(ctx context.Context, method, path string, in, out any) e
 			}
 			return json.Unmarshal(text, out)
 		default:
-			last = fmt.Errorf("HTTP %d: %.300s", status, text)
+			last = &HTTPError{status, string(text)}
 			q.Debug("quickpod %s %s -> %d", method, path, status)
 			if status < 500 && status != http.StatusTooManyRequests {
 				return last
 			}
 		}
-		if try == 4 {
+		if try == 4 || method != http.MethodGet {
 			return last
 		}
 		select {
@@ -151,19 +160,35 @@ type Pod struct {
 	Ports    string // the port mappings, whatever their format: sshPort reads the one of port 22
 }
 
+var ipInMapping = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3}):\d+`)
+
 func podFrom(m map[string]any) Pod {
 	machine, offer := sub(m["_machines"]), sub(m["_offers"])
-	ports := str(m["port_mappings"])
-	if p := str(m["Ports"]); p != "" {
+	ports := str(m["Ports"]) // Docker's "0.0.0.0:57450->22/tcp" first: port_mappings is HTML with the host's IP in it
+	if p := str(m["port_mappings"]); p != "" {
 		ports += " " + p
 	}
+	// the gpu_pods of the real API have no pod_uuid: the container's name is it ("Names", Docker may prefix a "/")
+	names := m["Names"]
+	if list, ok := names.([]any); ok && len(list) > 0 {
+		names = list[0]
+	}
+	ip := firstNonEmpty(str(m["public_ipaddr"]), str(m["public_ipaddress"]), str(machine["public_ipaddr"]))
+	if ip == "" {
+		if found := ipInMapping.FindStringSubmatch(str(m["port_mappings"])); found != nil {
+			ip = found[1]
+		}
+	}
 	return Pod{
-		UUID: firstNonEmpty(str(m["pod_uuid"]), str(m["Names"])), Name: str(m["altname"]), State: strings.ToLower(str(m["State"])),
-		Intended: strings.ToLower(str(m["intended_state"])), IP: firstNonEmpty(str(m["public_ipaddr"]), str(machine["public_ipaddr"])),
+		UUID: firstNonEmpty(str(m["pod_uuid"]), strings.TrimPrefix(str(names), "/")), Name: str(m["altname"]), State: strings.ToLower(str(m["State"])),
+		Intended: strings.ToLower(str(m["intended_state"])), IP: ip,
 		Machine: int64(num(m["machines_id"])), Offer: int64(num(m["offers_id"])), GPU: shortGPU(str(offer["gpu_type"])), Geo: str(machine["geolocation"]),
 		Dph: num(m["hourly_cost"]), Ports: ports,
 	}
 }
+
+// ours: the machines of this program carry Label, or Label and the nonce of the Up that rented them.
+func (p Pod) ours() bool { return p.Name == Label || strings.HasPrefix(p.Name, Label+"-") }
 
 func firstNonEmpty(s ...string) string {
 	for _, v := range s {
@@ -176,6 +201,7 @@ func firstNonEmpty(s ...string) string {
 
 var sshMapping = []*regexp.Regexp{
 	regexp.MustCompile(`(\d+)\s*->\s*22(?:/tcp)?\b`),                               // Docker's "0.0.0.0:40022->22/tcp"
+	regexp.MustCompile(`\b22\s*->\s*<a[^>]*>[^<]*?:(\d+)\s*<`),                     // QuickPod's `22 -> <a href=...>1.2.3.4:40022</a>`
 	regexp.MustCompile(`"22(?:/tcp)?"\s*:\s*\[\s*\{[^}]*"HostPort"\s*:\s*"(\d+)"`), // Docker's {"22/tcp":[{"HostPort":"40022"}]}
 	regexp.MustCompile(`"22(?:/tcp)?"\s*:\s*"?(\d+)"?`),                            // {"22": 40022}
 	regexp.MustCompile(`\b22(?:/tcp)?\s*(?:=>|:)\s*(\d+)\b`),                       // "22:40022"
@@ -274,28 +300,57 @@ func (q *QuickPod) Offers(ctx context.Context) ([]Offer, error) {
 	return offers, nil
 }
 
-// The engine's expert kernels need AVX2. These CPUs predate it: Xeon E5/E7 v1 and v2 (Sandy and Ivy Bridge, no
-// version suffix or "v2"), Core i3/i5/i7 of the 2nd and 3rd generation, Xeon X/L/E 5xxx and 3xxx, AMD FX, Phenom and
-// Opteron. llmd refuses such a machine too, but only after it was rented and had pulled the image (~5 min).
-var noAVX2 = regexp.MustCompile(`\bE[57]-\d{4}[A-Z]?(?:\s+0)?(?:\s+v2)?(?:\s+@|\s*$)|\bi[357]-[23]\d{3}[A-Z]*\b|\b[XL][35]\d{3}\b|\bE[35]\d{3}\b|\bFX(?:\(tm\))?-|Phenom|Opteron`)
+var (
+	// "E5-2697A v4", "E5-2630v2", "E5-2680 V2", "E5-2670 0", "E7- 4870", "E5-2630 v2 (12) @": the model's letter is
+	// any but v, so a version written without a space is still read as one
+	xeonE  = regexp.MustCompile(`(?i)\bE([357])-\s?(\d{4})[A-UW-Z]?\s*(?:\(\d+\))?\s*(?:v(\d)|0\b)?`)
+	coreI  = regexp.MustCompile(`(?i)\bi[357]-(\d{4,5})`)
+	oldCPU = regexp.MustCompile(`(?i)\b[XLWE][35]\d{3}\b|\bFX(?:\(tm\))?\s?-|Phenom|Opteron|Athlon|Pentium|Celeron`)
+)
+
+// lacksAVX2: the engine's expert kernels need AVX2. Xeon E3/E5/E7 before v3 (Sandy and Ivy Bridge), Core i3/i5/i7 of
+// the 2nd and 3rd generation and Ivy Bridge-E (i7-48xx/49xx), Xeon X/L/W/E 5xxx and 3xxx, AMD FX, Phenom, Opteron,
+// Athlon, Pentium and Celeron predate it. llmd refuses such a machine too, but only once it is rented and has pulled
+// the image (~5 min).
+func lacksAVX2(cpu string) bool {
+	if m := xeonE.FindStringSubmatch(cpu); m != nil {
+		gen, _ := strconv.Atoi(m[3])
+		return gen < 3 // no suffix (or " 0") is the first generation
+	}
+	if m := coreI.FindStringSubmatch(cpu); m != nil {
+		model := m[1]
+		return len(model) == 4 && (model[0] == '2' || model[0] == '3' || strings.HasPrefix(model, "48") || strings.HasPrefix(model, "49"))
+	}
+	return oldCPU.MatchString(cpu)
+}
+
+var leadingNumber = regexp.MustCompile(`\d+(?:\.\d+)?`)
+
+// atoiPrefix reads "4", "4.0" or "x16" as a number; 0 when there is none.
+func atoiPrefix(s string) float64 {
+	f, _ := strconv.ParseFloat(leadingNumber.FindString(s), 64)
+	return f
+}
 
 // fast: the configuration of the ~110 tok/s setup (all experts in RAM with room, PCIe 4.0+ x16, 10+ cores).
 func (o Offer) fast() bool {
-	gen, _ := strconv.Atoi(o.PCIe)
-	return o.RAM >= fastRAMGB && gen >= 4 && o.Lanes == "16" && o.Threads >= fastThreads
+	return o.RAM >= fastRAMGB && atoiPrefix(o.PCIe) >= 4 && atoiPrefix(o.Lanes) >= 16 && o.Threads >= fastThreads
 }
 
-// usable keeps the free single-GPU machines of the chosen card the model runs well on. The fast configuration comes
-// first, then the cheapest; among equals the one with more cores, then the faster network.
+// usable keeps the free single-GPU machines of the chosen card (or its Ti: the same VRAM, faster) the model runs well
+// on. The fast configuration comes first, then the cheapest; among equals the one with more cores, then the faster
+// network.
 func usable(offers []Offer, gpu string, bad []int64) (keep []Offer, dropped []string) {
 	for _, o := range offers {
-		if o.GPU != gpu || o.GPUs != 1 || o.Occupied {
+		if (o.GPU != gpu && o.GPU != gpu+" Ti") || o.GPUs != 1 || o.Occupied {
 			continue
 		}
 		reason := ""
 		switch {
-		case noAVX2.MatchString(o.CPU):
+		case lacksAVX2(o.CPU):
 			reason = "процессор без AVX2"
+		case atoiPrefix(o.Lanes) > 0 && atoiPrefix(o.Lanes) < 8:
+			reason = fmt.Sprintf("видеокарта на PCIe x%s: эксперты читаются по шине медленно", o.Lanes)
 		case o.RAM < minRAMGB:
 			reason = fmt.Sprintf("мало RAM: %.0f ГБ", o.RAM)
 		case o.Threads < minThreads:
@@ -340,27 +395,37 @@ func contains(list []int64, x int64) bool {
 }
 
 // Rent creates a pod on an offer from the account's template (the image runs llmd, which starts its own sshd with our
-// key on port 22). It returns the pod's UUID.
-func (q *QuickPod) Rent(ctx context.Context, offer int64, template, pubKeyB64 string) (string, error) {
+// key on port 22) and names it `name`, unique to this rent. It returns the pod's UUID. The request is sent once; when
+// it fails or its answer has no UUID (a timeout, a dropped connection, Down pressed meanwhile) the pod may exist all
+// the same, so it is looked up by its name - otherwise it would run and be billed unseen.
+func (q *QuickPod) Rent(ctx context.Context, offer int64, template, pubKeyB64, name string) (string, error) {
 	body := map[string]any{
-		"offers_id": offer, "template_uuid": template, "disk_size": strconv.Itoa(diskGB), "altname": Label,
+		"offers_id": offer, "template_uuid": template, "disk_size": strconv.Itoa(diskGB), "altname": name,
 		"docker_options": "-p 22:22 -e PUBKEY_B64=" + pubKeyB64,
 	}
 	var r map[string]any
-	if err := q.call(ctx, http.MethodPost, "/update/api/createpod", body, &r); err != nil {
-		return "", err
-	}
-	if uuid := firstNonEmpty(str(r["pod_uuid"]), str(sub(r["data"])["pod_uuid"])); uuid != "" {
+	err := q.call(ctx, http.MethodPost, "/update/api/createpod", body, &r)
+	if uuid := firstNonEmpty(str(r["pod_uuid"]), str(sub(r["data"])["pod_uuid"])); err == nil && uuid != "" {
 		return uuid, nil
 	}
-	// the pod may exist without its UUID in the answer: find it, or it would run (and be billed) unseen until a restart
-	pods, err := q.Pods(ctx)
-	for _, p := range pods {
-		if p.Name == Label && p.Offer == offer && p.UUID != "" {
-			return p.UUID, nil
+	look, cancel := context.WithTimeout(context.Background(), 40*time.Second) // also when ctx was cancelled by Down
+	defer cancel()
+	for try := 0; try < 3; try++ {
+		if pods, lerr := q.Pods(look); lerr == nil {
+			for _, p := range pods {
+				if p.Name == name && p.UUID != "" {
+					return p.UUID, nil
+				}
+			}
+		}
+		if try < 2 {
+			time.Sleep(q.Pause)
 		}
 	}
-	return "", fmt.Errorf("QuickPod не вернул pod_uuid (%.300s), в списке машин её нет (%v)", str(r), err)
+	if err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("QuickPod не вернул pod_uuid (%.300s), машины %s в списке нет", str(r), name)
 }
 
 func (q *QuickPod) Destroy(ctx context.Context, uuid string) error {

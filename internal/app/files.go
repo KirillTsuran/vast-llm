@@ -32,8 +32,12 @@ type Config struct {
 	Template string `json:"quickpod_template_uuid"`
 	GPU      string `json:"gpu"`
 	// the race rents the 2 best machines; if the second comes up first, the best gets this many seconds to catch up
-	Grace       int     `json:"cheapest_grace_seconds"`
-	Race        bool    `json:"race_two_hosts"`
+	Grace int  `json:"cheapest_grace_seconds"`
+	Race  bool `json:"race_two_hosts"`
+	// rent only the fast configuration (>= 100 GB RAM, PCIe 4.0 x16, >= 20 threads): without it the model answers
+	// slower. While there is none, Up waits for one up to wait_fast_minutes, then stops and says what is free instead.
+	FastOnly    bool    `json:"fast_only"`
+	WaitFastMin int     `json:"wait_fast_minutes"`
 	LocalPort   int     `json:"local_port"`
 	GrafanaPort int     `json:"grafana_port"`
 	UsdRub      float64 `json:"usd_rub"`
@@ -46,7 +50,7 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	return Config{GPU: GPUs[0], Grace: 20, LocalPort: 8080, GrafanaPort: 3000, UsdRub: 83.56,
+	return Config{GPU: GPUs[0], Grace: 20, FastOnly: true, WaitFastMin: 30, LocalPort: 8080, GrafanaPort: 3000, UsdRub: 83.56,
 		Autostart: true, LogDays: 30, Debug: true}
 }
 
@@ -62,16 +66,24 @@ type Rented struct {
 
 // State is state.json: every rented machine, written right after renting.
 type State struct {
-	Provider    string   `json:"provider"` // "quickpod"; a state.json without it is of the Vast versions
-	ID          string   `json:"pod_uuid"`
-	Machine     int64    `json:"machine_id"`
-	GPU         string   `json:"gpu"`
-	Geo         string   `json:"geo"`
-	Dph         float64  `json:"usd_per_hour"`
-	Created     stamp    `json:"created"`
-	HostKey     string   `json:"host_key"`
-	BadMachines []int64  `json:"bad_machines"`
-	Pending     []Rented `json:"pending"`
+	Provider string   `json:"provider"` // "quickpod"; a state.json without it is of the Vast versions
+	ID       string   `json:"pod_uuid"`
+	Machine  int64    `json:"machine_id"`
+	GPU      string   `json:"gpu"`
+	Geo      string   `json:"geo"`
+	Dph      float64  `json:"usd_per_hour"`
+	Created  stamp    `json:"created"`
+	HostKey  string   `json:"host_key"`
+	Blocked  []Block  `json:"blocked"` // machines not to rent for a while, and why
+	Pending  []Rented `json:"pending"`
+}
+
+// Block keeps a machine out of the offers until a time: for good when it cannot run the engine (no AVX2, too little
+// memory), for hours when it failed once (a download, SSH) - a busy or vanished offer is no fault of the machine.
+type Block struct {
+	Machine int64  `json:"machine"`
+	Until   stamp  `json:"until"`
+	Reason  string `json:"reason"`
 }
 
 // stamp is a UTC time that also reads the zone-less form written by VastLLM 1.x ("0001-01-01T00:00:00").
@@ -124,8 +136,8 @@ func (c *Core) setConfig(cfg Config) {
 // saveState is atomic: a crash or power loss never leaves a half-written state.json. Callers hold c.mu.
 func (c *Core) saveState() {
 	c.st.Provider = provider
-	if c.st.BadMachines == nil {
-		c.st.BadMachines = []int64{} // written as [] rather than null
+	if c.st.Blocked == nil {
+		c.st.Blocked = []Block{} // written as [] rather than null
 	}
 	if c.st.Pending == nil {
 		c.st.Pending = []Rented{}
@@ -151,6 +163,23 @@ func (c *Core) loadState() {
 	}
 	if st.Provider != provider { // machine numbers and the blacklist of Vast mean nothing at QuickPod
 		c.Log("state.json остался от версии для Vast — начинаю с чистого")
+		var vast struct {
+			ID      int64 `json:"instance_id"`
+			Pending []struct {
+				ID int64 `json:"id"`
+			} `json:"pending"`
+		}
+		json.Unmarshal(raw, &vast)
+		var left []string
+		if vast.ID != 0 {
+			left = append(left, fmt.Sprint(vast.ID))
+		}
+		for _, p := range vast.Pending {
+			left = append(left, fmt.Sprint(p.ID))
+		}
+		if len(left) > 0 { // this version cannot delete them: they would be billed by Vast unseen
+			c.Log("⚠ в нём были машины Vast " + strings.Join(left, ", ") + ": эта версия их не видит — удалите их на console.vast.ai, если они ещё есть")
+		}
 		return
 	}
 	c.mu.Lock()
