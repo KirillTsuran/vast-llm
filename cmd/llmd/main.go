@@ -32,6 +32,8 @@ const (
 	minRAMGiB = 58
 	// the MTP draft vocabulary (Strata's data/draft_vocab_<name>.bin): English, code and Cyrillic
 	draftVocab = "cyrillic"
+	// RAM kept for the engine and the page cache before any goes to the conversation cache
+	conversationRAMFloorGiB = 56
 )
 
 // Model is /opt/llm/model.json: pinned Hugging Face files and the name the API answers to.
@@ -234,7 +236,7 @@ func bringUp(m Model) error {
 	if cores := physicalCores("/proc/cpuinfo"); cores > 0 {
 		cpus = min(cpus, cores)
 	}
-	cfg, err := json.MarshalIndent(engineConfig(m, cpus), "", " ")
+	cfg, err := json.MarshalIndent(engineConfig(m, cpus, float64(memoryLimit(cgroupDir, "/proc/meminfo"))/(1<<30)), "", " ")
 	if err != nil {
 		return err
 	}
@@ -273,19 +275,26 @@ func bringUp(m Model) error {
 // 2026-10-10), with the engine's own defaults for the prompt cache and the repeat guard. `cpus` is the container's
 // quota capped at the physical cores (hyper-threads add nothing to the expert pool, results-cores-20261009); the
 // engine's default counts the host's cores, which halves the speed on a machine with a quota.
-func engineConfig(m Model, cpus int) map[string]any {
+func engineConfig(m Model, cpus int, memGiB float64) map[string]any {
 	pack := dataDir + "/pack"
+	args := []string{
+		"--pack", pack, "--native", m.path(m.Weights), "--ple-gguf", m.path(m.PLE),
+		"--expert-profile", strataDir + "/data/expert-profile.bin", "--expert-cache", "auto", "--prefill", "auto",
+		"--spec", "4", "--spec-min-p", "0.5", "--mtp", dataDir + "/mtp/rt",
+		"--max-context", strconv.Itoa(m.Context), "--kv", "int8", "--kv-resident", "32768",
+		// 700 MiB as in the ~110 tok/s setup (2048 before): ~800 more experts fit in VRAM
+		"--pool-workers", strconv.Itoa(max(1, cpus-1)), "--vram-reserve-mib", "700",
+	}
+	// the conversation cache parks whole conversations in RAM: an agent and its subagents take turns in the one slot, and
+	// without it every switch read the conversation again (24K tokens: 10.6 s -> 0.9 s; the continuation decodes the same
+	// tokens). It gets the RAM the engine (~46 GiB) and the page cache of the PLE table leave, up to 16 GiB.
+	if mib := min(16384, int(memGiB-conversationRAMFloorGiB)*1024); mib >= 4096 { // less holds barely one long conversation
+		args = append(args, "--conversation-cache-mib", strconv.Itoa(mib), "--conversation-cache-slots", "4")
+	}
 	cfg := map[string]any{
-		"exe": strataDir + "/engine/strata",
-		"args": []string{
-			"--pack", pack, "--native", m.path(m.Weights), "--ple-gguf", m.path(m.PLE),
-			"--expert-profile", strataDir + "/data/expert-profile.bin", "--expert-cache", "auto", "--prefill", "auto",
-			"--spec", "4", "--spec-min-p", "0.5", "--mtp", dataDir + "/mtp/rt",
-			"--max-context", strconv.Itoa(m.Context), "--kv", "int8", "--kv-resident", "32768",
-			// 700 MiB as in the ~110 tok/s setup (2048 before): ~800 more experts fit in VRAM
-			"--pool-workers", strconv.Itoa(max(1, cpus-1)), "--vram-reserve-mib", "700",
-		},
-		"cwd": strataDir, "tokenizer": pack + "/tokenizer", "model_name": m.Name, "lib_dirs": []string{"/usr/local/cuda-13.0/lib64"},
+		"exe":  strataDir + "/engine/strata",
+		"args": args,
+		"cwd":  strataDir, "tokenizer": pack + "/tokenizer", "model_name": m.Name, "lib_dirs": []string{"/usr/local/cuda-13.0/lib64"},
 		"host": "127.0.0.1", "port": 8080, "open_browser": false, "log": logDir + "/engine.log",
 		// a client that asks for more answer than the context has left (ZCode: up to 131072 tokens beside a 131K-token
 		// prompt) gets the answer shortened to the room left instead of a 400 that stops its turn
