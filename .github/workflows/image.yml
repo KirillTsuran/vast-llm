@@ -25,7 +25,8 @@ jobs:
           context: .
           file: image/Dockerfile
           push: true
-          # every run pushes its commit tag; main also pushes :3, the tag VastLLM rents          tags: |
+          # every run pushes its commit tag; main also pushes :3, the tag VastLLM rents
+          tags: |
             ghcr.io/kirilltsuran/vast-llm:${{ github.sha }}
             ${{ github.ref == 'refs/heads/main' && 'ghcr.io/kirilltsuran/vast-llm:3' || '' }}
           labels: org.opencontainers.image.source=https://github.com/KirillTsuran/vast-llm
