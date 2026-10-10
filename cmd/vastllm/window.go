@@ -45,10 +45,13 @@ func runWindow(core *app.Core, startInTray bool, showEvent windows.Handle) error
 			Label{AssignTo: &w.phase, Font: bold},
 			Label{AssignTo: &w.msg, TextColor: walk.RGB(110, 110, 110)},
 			Label{AssignTo: &w.info},
-			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
+			Composite{Layout: Grid{Columns: 3, MarginsZero: true}, Children: []Widget{
 				Label{Text: "ZCode URL:"},
 				LineEdit{AssignTo: &w.url, ReadOnly: true},
-				PushButton{Text: "Копировать", OnClicked: func() { walk.Clipboard().SetText(strings.Fields(w.url.Text())[0]) }},
+				PushButton{Text: "Копировать URL", OnClicked: func() { walk.Clipboard().SetText(w.url.Text()) }},
+				Label{Text: "Модель:"},
+				LineEdit{Text: app.Model, ReadOnly: true},
+				PushButton{Text: "Копировать модель", OnClicked: func() { walk.Clipboard().SetText(app.Model) }},
 			}},
 			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 				ComboBox{AssignTo: &w.gpu, Model: app.GPUs, OnCurrentIndexChanged: w.gpuChosen},
@@ -175,7 +178,7 @@ func (w *window) refresh() {
 		w.tray.SetToolTip("VastLLM: " + name)
 	}
 	w.msg.SetText(v.Message)
-	if url := fmt.Sprintf("http://127.0.0.1:%d/v1   модель: %s", v.Cfg.LocalPort, app.Model); w.url.Text() != url {
+	if url := fmt.Sprintf("http://127.0.0.1:%d/v1", v.Cfg.LocalPort); w.url.Text() != url {
 		w.url.SetText(url)
 	}
 	if i := slices.Index(app.GPUs, v.Cfg.GPU); i != w.gpu.CurrentIndex() {
@@ -206,7 +209,7 @@ func infoText(v app.View) string {
 		var lines []string
 		for _, m := range v.Machines {
 			total += m.Dph
-			hours := time.Since(m.Created.Time).Hours()
+			hours := time.Since(m.Created).Hours()
 			mark, note := "●", ""
 			if !m.Main {
 				mark, note = "○", " (запуск)"

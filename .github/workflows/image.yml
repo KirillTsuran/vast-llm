@@ -25,8 +25,7 @@ jobs:
           context: .
           file: image/Dockerfile
           push: true
-          # ":2" is what VastLLM 2.x rents; a run from another branch only gets its commit tag (VASTLLM_IMAGE to try it)
-          tags: |
+          # every run pushes its commit tag; main also pushes :3, the tag VastLLM rents          tags: |
             ghcr.io/kirilltsuran/vast-llm:${{ github.sha }}
             ${{ github.ref == 'refs/heads/main' && 'ghcr.io/kirilltsuran/vast-llm:3' || '' }}
           labels: org.opencontainers.image.source=https://github.com/KirillTsuran/vast-llm

@@ -89,11 +89,11 @@ func TestMachineChecks(t *testing.T) {
 	if err := checkMachine(filepath.Join(small, "cpuinfo"), small, ""); err == nil || !strings.Contains(err.Error(), "мало памяти") {
 		t.Errorf("32 GiB must be refused, got %v", err)
 	}
-	old := cgroup(t, map[string]string{"memory.max": "max\n", "cpuinfo": "flags : fpu sse avx\n", "meminfo": "MemTotal:       131072000 kB\n"})
-	if err := checkMachine(filepath.Join(old, "cpuinfo"), old, filepath.Join(old, "meminfo")); err == nil || !strings.Contains(err.Error(), "AVX2") {
+	host := cgroup(t, map[string]string{"memory.max": "max\n", "cpuinfo": "flags : fpu sse avx\n", "meminfo": "MemTotal:       131072000 kB\n"})
+	if err := checkMachine(filepath.Join(host, "cpuinfo"), host, filepath.Join(host, "meminfo")); err == nil || !strings.Contains(err.Error(), "AVX2") {
 		t.Errorf("a CPU without AVX2 must be refused, got %v", err)
 	}
-	if got := memoryLimit(old, filepath.Join(old, "meminfo")); got != 131072000*1024 {
+	if got := memoryLimit(host, filepath.Join(host, "meminfo")); got != 131072000*1024 {
 		t.Errorf("no container limit: the host's RAM, got %d", got)
 	}
 }
@@ -144,7 +144,7 @@ func TestCgroupV1Limits(t *testing.T) {
 	}
 }
 
-// the expert pool gets one worker per physical core: hyper-threads added nothing in the RTX 3090 test (results-cores-20261009)
+// the CPU count is capped at the physical cores: hyper-threads added nothing to the expert pool in the RTX 3090 test (results-cores-20261009)
 func TestPhysicalCores(t *testing.T) {
 	var b strings.Builder
 	for cpu := range 24 { // Ryzen 9 5900X: 12 cores, 2 threads each

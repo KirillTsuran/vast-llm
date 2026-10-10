@@ -18,9 +18,9 @@ import (
 var cgroupDir = "/sys/fs/cgroup"
 
 // serveMetrics is the Prometheus exporter on 127.0.0.1:9101: the GPU (nvidia-smi), this container's own limits and
-// usage (cgroup v2; node_exporter sees the whole Vast host), and the engine's JSON /metrics turned into counters.
+// usage (cgroup v2; node_exporter sees the whole host), and the engine's JSON /metrics turned into counters.
 func serveMetrics(addr string) {
-	var log requestLog
+	var answers requestLog
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		// the engine answers between generation steps, which takes seconds under load: it gets nearly the whole
@@ -48,7 +48,7 @@ func serveMetrics(addr string) {
 		containerMetrics(&b, cgroupDir)
 		gauge(&b, "llm_engine_up", b2f(err == nil))
 		if err == nil {
-			engineMetrics(&b, engine, &log)
+			engineMetrics(&b, engine, &answers)
 		}
 		counterLine(&b, "llm_engine_restarts_total", float64(engineRestarts.Load()))
 		w.Write([]byte(b.String()))
@@ -129,8 +129,8 @@ func containerMetrics(b *strings.Builder, dir string) {
 		}
 	}
 	var read, written float64
-	io, _ := os.ReadFile(filepath.Join(dir, "io.stat"))
-	for _, field := range strings.Fields(string(io)) {
+	ioStat, _ := os.ReadFile(filepath.Join(dir, "io.stat"))
+	for _, field := range strings.Fields(string(ioStat)) {
 		if v, ok := strings.CutPrefix(field, "rbytes="); ok {
 			n, _ := strconv.ParseFloat(v, 64)
 			read += n
@@ -263,7 +263,7 @@ func (l *requestLog) add(s engineStats) requestTotals {
 	return out
 }
 
-func engineMetrics(b *strings.Builder, s engineStats, log *requestLog) {
+func engineMetrics(b *strings.Builder, s engineStats, answers *requestLog) {
 	val := func(p *float64) float64 {
 		if p == nil {
 			return 0
@@ -327,7 +327,7 @@ func engineMetrics(b *strings.Builder, s engineStats, log *requestLog) {
 	counterLine(b, "llm_drafts_offered_total", s.Totals.Offered)
 	counterLine(b, "llm_drafts_accepted_total", s.Totals.Accepted)
 
-	t := log.add(s)
+	t := answers.add(s)
 	counterLine(b, "llm_request_seconds_total", t.seconds)
 	counterLine(b, "llm_request_prompt_seconds_total", t.promptSecs)
 	counterLine(b, "llm_request_output_tokens_total", t.output)

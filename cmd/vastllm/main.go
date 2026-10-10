@@ -17,7 +17,7 @@ import (
 	"github.com/KirillTsuran/vast-llm/internal/app"
 )
 
-var version = "dev" // set by the release build: -ldflags "-X main.version=2.0.0"
+var version = "dev" // set by the release build: -ldflags "-X main.version=3.0.1"
 
 func main() {
 	exe, _ := os.Executable()

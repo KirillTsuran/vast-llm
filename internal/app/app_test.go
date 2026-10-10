@@ -24,8 +24,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// ---------- files written by the Vast versions ----------
-
 func TestReadsFilesOfVastVersions(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"vast_api_key":"k","gpu":"RTX 4090","cheapest_grace_seconds":7,
@@ -53,17 +51,26 @@ func TestReadsFilesOfVastVersions(t *testing.T) {
 	if c.st.ID != "" || len(c.st.Blocked) != 0 || len(c.st.Pending) != 0 {
 		t.Errorf("the machines and blacklist of Vast mean nothing at QuickPod: state %+v", c.st)
 	}
-	if len(logged) != 2 || !strings.Contains(logged[0], "для Vast") || !strings.Contains(logged[1], "машины Vast 5") {
-		t.Errorf("a machine left at Vast is named, so it is not billed unseen: %q", logged)
+	if len(logged) != 1 || !strings.Contains(logged[0], "state.json не от этой версии — начинаю с чистого") {
+		t.Errorf("a state.json without provider is not read, and the journal says so: %q", logged)
 	}
 }
 
 func TestStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	c := New(dir)
-	c.st = State{ID: "3f2a9c10-aaaa", Machine: 303, Blocked: []Block{{7, stamp{time.Now().Add(time.Hour).UTC()}, "SSH"}},
+	c.st = State{ID: "3f2a9c10-aaaa", Machine: 303, Blocked: []Block{{7, time.Now().Add(time.Hour).UTC(), "SSH"}},
 		Pending: []Rented{{ID: "b1-x", Machine: 8, Created: now()}}}
 	c.saveState()
+	raw, _ := os.ReadFile(filepath.Join(dir, "state.json"))
+	var written struct {
+		Blocked []struct {
+			Until string `json:"until"`
+		} `json:"blocked"`
+	}
+	if err := json.Unmarshal(raw, &written); err != nil || len(written.Blocked) != 1 || !strings.HasSuffix(written.Blocked[0].Until, "Z") {
+		t.Errorf("times are written as RFC3339 in UTC, with Z: %s (%v)", raw, err)
+	}
 	again := New(dir)
 	again.loadState()
 	if again.st.ID != "3f2a9c10-aaaa" || again.st.Provider != provider || len(again.st.Pending) != 1 || again.st.Pending[0].ID != "b1-x" ||
@@ -78,7 +85,7 @@ func TestBlocksExpire(t *testing.T) {
 	defer c.mu.Unlock()
 	c.blockLocked(1, false, "SSH")
 	c.blockLocked(2, true, "процессор без AVX2")
-	c.st.Blocked = append(c.st.Blocked, Block{3, stamp{time.Now().Add(-time.Minute).UTC()}, "old"})
+	c.st.Blocked = append(c.st.Blocked, Block{3, time.Now().Add(-time.Minute).UTC(), "old"})
 	if got := fmt.Sprint(c.blockedLocked()); got != "[1 2]" {
 		t.Errorf("an expired block is dropped: %s", got)
 	}
@@ -126,8 +133,6 @@ func TestModelMatchesImage(t *testing.T) {
 		t.Errorf("image/model.json says %q (%v), the app says %q", m.Name, err, Model)
 	}
 }
-
-// ---------- offers ----------
 
 func TestUsableOffers(t *testing.T) {
 	base := Offer{GPU: "RTX 3090", GPUs: 1, RAM: 62, Threads: 16, PCIe: "3", Lanes: "16", Inet: 900, FreeDisk: 800, Reliability: 97}
@@ -216,8 +221,6 @@ func TestSSHPort(t *testing.T) {
 		}
 	}
 }
-
-// ---------- QuickPod API ----------
 
 func testQuickPod(h http.HandlerFunc) (*QuickPod, *httptest.Server) {
 	srv := httptest.NewServer(h)
@@ -348,8 +351,6 @@ func TestOffersAndPodsParse(t *testing.T) {
 	}
 }
 
-// ---------- the two-host race ----------
-
 func TestPickWinner(t *testing.T) {
 	best, second := Rented{ID: "best", Dph: 0.18}, Rented{ID: "second", Dph: 0.30}
 	boom := errors.New("boom")
@@ -370,7 +371,7 @@ func TestPickWinner(t *testing.T) {
 	for _, tc := range cases {
 		ch := make(chan dialed, 2)
 		tc.feed(ch)
-		win, lost := pickWinner(context.Background(), []Rented{best, second}, ch, tc.grace, func(string, ...any) {})
+		win, lost := pickWinner(context.Background(), []Rented{best, second}, ch, tc.grace, func(string) {})
 		got := ""
 		if win != nil {
 			got = win.r.ID
@@ -381,12 +382,10 @@ func TestPickWinner(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if win, _ := pickWinner(ctx, []Rented{best}, make(chan dialed), time.Hour, func(string, ...any) {}); win != nil {
+	if win, _ := pickWinner(ctx, []Rented{best}, make(chan dialed), time.Hour, func(string) {}); win != nil {
 		t.Error("a cancelled Up has no winner")
 	}
 }
-
-// ---------- SSH tunnel against an in-process sshd ----------
 
 // sshd accepts only `allowed`, answers exec through `run` and sends every forwarded connection to `target`.
 func sshd(t *testing.T, allowed ssh.PublicKey, target string, run func(cmd string) string) (addr string) {
@@ -517,8 +516,6 @@ func TestTunnel(t *testing.T) {
 	}
 	tun.close()
 }
-
-// ---------- Startup, Up and Down against a fake QuickPod and the in-process sshd ----------
 
 // fakeQuickPod answers like the real API: gpu_pods name a pod by "Names" (no pod_uuid), createpod returns the UUID.
 type fakeQuickPod struct {
@@ -773,5 +770,38 @@ func TestFastOnlyWaits(t *testing.T) {
 	}
 	if len(rig.fake.rented) != 0 {
 		t.Error("waiting rents nothing")
+	}
+}
+
+// reconcile reads the QuickPod key, which takes c.mu itself, so it must not read the key while it holds the lock
+func TestReconcileDoesNotDeadlock(t *testing.T) {
+	rig := newRig(t, "", "ready")
+	c := rig.core()
+	c.loadConfig() // the key of config.json goes into cfg
+	done := make(chan struct{})
+	go func() {
+		c.reconcile()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile does not return: it asks for the key while it holds c.mu")
+	}
+}
+
+// the Bank of Russia answers with an error: the last known rate stays, and the journal says so
+func TestRateKeepsLastKnownOnFailure(t *testing.T) {
+	bank := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer bank.Close()
+	c := New(t.TempDir())
+	c.rates = bank.URL
+	var logged []string
+	c.OnLog = func(s string) { logged = append(logged, s) }
+	c.RefreshRate()
+	if c.Config().UsdRub != defaultConfig().UsdRub || len(logged) != 1 || !strings.Contains(logged[0], "курс ЦБ недоступен") {
+		t.Errorf("a failed rate keeps the last known one and says so: rate %v, log %q", c.Config().UsdRub, logged)
 	}
 }

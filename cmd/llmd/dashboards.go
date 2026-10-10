@@ -223,9 +223,9 @@ func dashboards() map[string][]byte {
 		q{"llm_gpu_sm_clock_mhz", "сейчас"}, q{"llm_gpu_sm_clock_max_mhz", "максимум"})
 	m.y += 9
 
-	m.row("Контейнер: память, процессор, диск, сеть (в пределах лимитов Vast)")
+	m.row("Контейнер: память, процессор, диск, сеть (в пределах лимитов контейнера)")
 	m.lines("Оперативная память", 0, 8, look{unit: "bytes", colors: map[string]string{"занято всего": "blue", "из них программы": "purple", "лимит контейнера": "red"},
-		desc: "Память нашего контейнера (не всего сервера Vast). «Программы» нельзя освободить; остальное — файловый кэш, ядро отдаёт его само. " +
+		desc: "Память нашего контейнера (не всего сервера). «Программы» нельзя освободить; остальное — файловый кэш, ядро отдаёт его само. " +
 			"Если «программы» дойдут до лимита, процесс будет убит"},
 		q{"llm_container_memory_used_bytes", "занято всего"}, q{"llm_container_memory_programs_bytes", "из них программы"},
 		q{"llm_container_memory_limit_bytes", "лимит контейнера"})
@@ -246,8 +246,8 @@ func dashboards() map[string][]byte {
 	m.row("Сервисы")
 	// max over 1 minute: one slow scrape while the model is busy is not an outage
 	m.stat("Движок Strata", 0, 3, look{mappings: upDown}, q{"max(max_over_time(llm_engine_up[1m])) or vector(0)", ""})
-	for i, s := range []q{{"llmd", "llmd (экспортёр)"}, {"node", "node_exporter"}, {"prometheus", "Prometheus"}, {"loki", "Loki"}, {"alloy", "Alloy"}} {
-		m.stat(s.name, (i+1)*3, 3, look{mappings: upDown}, q{fmt.Sprintf(`max(max_over_time(up{job=%q}[1m])) or vector(0)`, s.expr), ""})
+	for i, s := range []struct{ job, title string }{{"llmd", "llmd (экспортёр)"}, {"node", "node_exporter"}, {"prometheus", "Prometheus"}, {"loki", "Loki"}, {"alloy", "Alloy"}} {
+		m.stat(s.title, (i+1)*3, 3, look{mappings: upDown}, q{fmt.Sprintf(`max(max_over_time(up{job=%q}[1m])) or vector(0)`, s.job), ""})
 	}
 	m.stat("Убито по памяти, сутки", 18, 6, look{color: "red", desc: "Сколько процессов ядро убило из-за нехватки памяти контейнера за сутки. Норма — 0"},
 		q{"sum(increase(llm_container_oom_kills_total[24h])) or vector(0)", ""})
