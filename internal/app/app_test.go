@@ -130,6 +130,11 @@ func TestUsableOffers(t *testing.T) {
 		with(11, func(o *Offer) { o.Dph = 0.05; o.GPU = "RTX 3090 Ti" }),
 		with(12, func(o *Offer) { o.Dph = 0.05; o.GPUs = 2 }),
 		with(13, func(o *Offer) { o.Dph = 0.05; o.Occupied = true }),
+		with(14, func(o *Offer) {
+			o.Dph = 0.18
+			o.RAM, o.Threads = 125, 24
+			o.CPU = "Intel(R) Xeon(R) CPU E5-2630 v2 @ 2.60GHz"
+		}),
 	}, "RTX 3090", []int64{99})
 	var got []int64
 	for _, o := range keep {
@@ -138,8 +143,27 @@ func TestUsableOffers(t *testing.T) {
 	if fmt.Sprint(got) != "[2 4 3 1]" {
 		t.Errorf("the fast configuration first, then the cheapest, then more cores: %v", got)
 	}
-	if len(dropped) != 6 || !strings.Contains(strings.Join(dropped, "|"), "мало RAM") || !strings.Contains(strings.Join(dropped, "|"), "чёрном списке") {
+	if len(dropped) != 7 || !strings.Contains(strings.Join(dropped, "|"), "без AVX2") || !strings.Contains(strings.Join(dropped, "|"), "мало RAM") || !strings.Contains(strings.Join(dropped, "|"), "чёрном списке") {
 		t.Errorf("dropped: %v", dropped)
+	}
+}
+
+// the CPU names QuickPod listed on 2026-10-11, and older ones a host may have
+func TestNoAVX2(t *testing.T) {
+	for cpu, old := range map[string]bool{
+		"Intel(R) Xeon(R) CPU E5-2630 v2 @ 2.60GHz": true, "Intel(R) Xeon(R) CPU E5-2670 v2 @ 2.50GHz": true,
+		"Intel(R) Xeon(R) CPU E5-2670 0 @ 2.60GHz": true, "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz": true,
+		"Intel(R) Xeon(R) CPU X5670 @ 2.93GHz": true, "AMD FX(tm)-8350 Eight-Core Processor": true,
+		"Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz": false, "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz": false,
+		"Intel(R) Xeon(R) CPU E5-2697A v4 @ 2.60GHz": false, "AMD Ryzen 9 5900X 12-Core Processor": false,
+		"AMD Ryzen 9 5950X 16-Core Processor": false, "Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz": false,
+		"Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz": false, "Intel(R) Xeon(R) W-2223 CPU @ 3.60GHz": false,
+		"AMD EPYC 9B14 96-Core Processor": false, "11th Gen Intel(R) Core(TM) i7-11700 @ 2.50GHz": false,
+		"AMD Ryzen 7 2700 Eight-Core Processor": false, "Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz": false,
+	} {
+		if noAVX2.MatchString(cpu) != old {
+			t.Errorf("%q: without AVX2 = %v, want %v", cpu, !old, old)
+		}
 	}
 }
 

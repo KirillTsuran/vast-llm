@@ -274,6 +274,11 @@ func (q *QuickPod) Offers(ctx context.Context) ([]Offer, error) {
 	return offers, nil
 }
 
+// The engine's expert kernels need AVX2. These CPUs predate it: Xeon E5/E7 v1 and v2 (Sandy and Ivy Bridge, no
+// version suffix or "v2"), Core i3/i5/i7 of the 2nd and 3rd generation, Xeon X/L/E 5xxx and 3xxx, AMD FX, Phenom and
+// Opteron. llmd refuses such a machine too, but only after it was rented and had pulled the image (~5 min).
+var noAVX2 = regexp.MustCompile(`\bE[57]-\d{4}[A-Z]?(?:\s+0)?(?:\s+v2)?(?:\s+@|\s*$)|\bi[357]-[23]\d{3}[A-Z]*\b|\b[XL][35]\d{3}\b|\bE[35]\d{3}\b|\bFX(?:\(tm\))?-|Phenom|Opteron`)
+
 // fast: the configuration of the ~110 tok/s setup (all experts in RAM with room, PCIe 4.0+ x16, 10+ cores).
 func (o Offer) fast() bool {
 	gen, _ := strconv.Atoi(o.PCIe)
@@ -289,6 +294,8 @@ func usable(offers []Offer, gpu string, bad []int64) (keep []Offer, dropped []st
 		}
 		reason := ""
 		switch {
+		case noAVX2.MatchString(o.CPU):
+			reason = "процессор без AVX2"
 		case o.RAM < minRAMGB:
 			reason = fmt.Sprintf("мало RAM: %.0f ГБ", o.RAM)
 		case o.Threads < minThreads:
