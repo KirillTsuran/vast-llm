@@ -16,8 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 
 # The engine is compiled here the way Strata's own Dockerfile does it: docker build has no GPU, so the CUDA
 # architectures are fixed (a fat binary with a cubin per arch: RTX 30 = 86, RTX 40 = 89, RTX 50 = 120).
-# fb58e0d is engine 0.1.41 (v0.1.41), the version of the ~110 tok/s setup on one RTX 3090 (2026-10-10).
-ARG STRATA_COMMIT=fb58e0dbc8399662c0e47c76578c6e878b14f6cf
+# 61b3fb5 is engine 0.1.42 (v0.1.42): on RTX 3090 + Ryzen 9 5900X it answered 118 tok/s in Russian, 105 in English and
+# 103 after a 26K-token prompt, against 110 / 100 / 89 of 0.1.41 (QuickPod, 2026-10-11).
+ARG STRATA_COMMIT=61b3fb5dd3f1e8ec09cf7e4e05208bc6d3c46406
 ARG CUDA_ARCHITECTURES=86;89;120
 WORKDIR /opt/strata
 RUN git init -q . && git fetch -q --depth 1 https://github.com/Niko1221/Strata "$STRATA_COMMIT" && git checkout -q FETCH_HEAD \
